@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TLDR</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header class="header">
+      <span class="logo">TLDR</span>
+      <button id="clear-hl" class="ghost-btn" title="Clear page highlight">
+        Clear highlight
+      </button>
+    </header>
+
+    <section id="context" class="context">
+      <div class="context-label">Selected from page</div>
+      <div id="context-text" class="context-text">Waiting for a selection…</div>
+    </section>
+
+    <div id="notice" class="notice" hidden></div>
+
+    <main id="messages" class="messages" aria-live="polite"></main>
+
+    <form id="composer" class="composer">
+      <textarea
+        id="input"
+        class="input"
+        rows="1"
+        placeholder="Ask about the selection…"
+        autocomplete="off"
+      ></textarea>
+      <button id="send" type="submit" class="send-btn">Send</button>
+    </form>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <script src="panel.js"></script>
+  </body>
+</html>

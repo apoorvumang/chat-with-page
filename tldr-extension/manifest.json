@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "TLDR — Chat with Page Selection",
+  "version": "0.1.0",
+  "description": "Select text, right-click TLDR, and chat with the selection. Answers link back to the exact source span in the page.",
+  "permissions": [
+    "contextMenus",
+    "sidePanel",
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/panel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "TLDR"
+  }
+}
