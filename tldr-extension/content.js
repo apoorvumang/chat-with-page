@@ -71,13 +71,23 @@
         error: "No selection was captured. Select some text and try again.",
       };
     }
-    const root = range.commonAncestorContainer;
+    let root = range.commonAncestorContainer;
     if (!root || !root.isConnected) {
       return {
         text: "",
         map: [],
         error: "The page changed; that selection is no longer available.",
       };
+    }
+    // A TreeWalker only visits descendants. When the selection is inside a
+    // single text node, commonAncestorContainer IS that text node (very common
+    // — e.g. selecting within one tweet or one sentence), so walk its parent
+    // element instead; the acceptNode filter still restricts us to the range.
+    if (root.nodeType !== Node.ELEMENT_NODE) {
+      root = root.parentElement || root.parentNode;
+    }
+    if (!root) {
+      return { text: "", map: [], error: "No readable text found in the selection." };
     }
 
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -196,19 +206,25 @@
     if (end <= start) return false;
 
     const map = extraction.map;
-    const startEntry = findEntry(map, start);
-    const endEntry = findEntry(map, end - 1);
+    // The extraction string contains synthetic "\n" block separators that have
+    // no map entry. Clamp both ends onto real, mapped characters so a range
+    // that snapped onto a separator (e.g. a heading with no trailing period)
+    // still resolves.
+    const startEntry = findEntry(map, start) || firstEntryAtOrAfter(map, start);
+    const endEntry = findEntry(map, end - 1) || lastEntryAtOrBefore(map, end - 1);
     if (!startEntry || !endEntry) return false;
+
+    const sIdx = Math.max(start, startEntry.start);
+    const eIdx = Math.min(end - 1, endEntry.end - 1);
+    if (eIdx < sIdx) return false;
 
     if (!startEntry.node.isConnected || !endEntry.node.isConnected) {
       // DOM mutated out from under us — best-effort text search fallback.
-      return highlightByTextSearch(extraction.text.slice(start, end));
+      return highlightByTextSearch(extraction.text.slice(sIdx, eIdx + 1));
     }
 
-    const localStart = start - startEntry.start;
-    const localEnd = end - 1 - endEntry.start;
-    const nodeStart = startEntry.rawOffsets[localStart];
-    const nodeEnd = endEntry.rawOffsets[localEnd] + 1;
+    const nodeStart = startEntry.rawOffsets[sIdx - startEntry.start];
+    const nodeEnd = endEntry.rawOffsets[eIdx - endEntry.start] + 1;
 
     let range;
     try {
@@ -238,6 +254,8 @@
 
     let e = end;
     while (e < n && !isSentenceEnd(text[e - 1])) e++;
+    // Don't let the range end on trailing whitespace / a "\n" block separator.
+    while (e > s && isWs(text[e - 1])) e--;
 
     return { start: s, end: e };
   }
@@ -256,6 +274,21 @@
       if (offset < e.start) hi = mid - 1;
       else if (offset >= e.end) lo = mid + 1;
       else return e;
+    }
+    return null;
+  }
+
+  // First entry whose text reaches at or past `offset` (for clamping a range
+  // start that landed in a synthetic separator gap).
+  function firstEntryAtOrAfter(map, offset) {
+    for (let i = 0; i < map.length; i++) if (map[i].end > offset) return map[i];
+    return null;
+  }
+
+  // Last entry whose text starts at or before `offset`.
+  function lastEntryAtOrBefore(map, offset) {
+    for (let i = map.length - 1; i >= 0; i--) {
+      if (map[i].start <= offset) return map[i];
     }
     return null;
   }

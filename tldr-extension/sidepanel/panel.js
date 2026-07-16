@@ -291,21 +291,28 @@ async function askLLM(context, messages) {
     (question && !/summar/i.test(question) ? ` (re: "${question}")` : "") +
     ":\n\n";
 
-  const paragraphs = context
-    .split("\n")
-    .map((p) => p.trim())
-    .filter(Boolean);
+  // Split into blocks on the "\n" separators, tracking each block's exact
+  // offset in `context` so attributions never rely on an ambiguous indexOf.
+  const blocks = [];
+  let cursor = 0;
+  for (const raw of context.split("\n")) {
+    const leading = raw.length - raw.trimStart().length;
+    const trimmed = raw.trim();
+    if (trimmed) blocks.push({ text: trimmed, start: cursor + leading });
+    cursor += raw.length + 1; // +1 for the consumed "\n"
+  }
 
   const attributions = [];
   let body = "";
 
-  for (const para of paragraphs.slice(0, 6)) {
-    const m = para.match(/^[\s\S]*?[.!?](\s|$)/);
-    const sentence = (m ? m[0] : para).trim();
+  for (const block of blocks.slice(0, 6)) {
+    // First sentence of the block (offsets are exact relative to block.start).
+    const m = block.text.match(/^[\s\S]*?[.!?](?=\s|$)/);
+    const sentence = m ? m[0] : block.text;
     if (!sentence) continue;
 
-    const sourceStart = context.indexOf(sentence);
-    const sourceEnd = sourceStart + sentence.length;
+    const sourceStart = block.start;
+    const sourceEnd = block.start + sentence.length;
 
     const bulletPrefix = "• ";
     const answerStart = prefix.length + body.length + bulletPrefix.length;
@@ -313,9 +320,7 @@ async function askLLM(context, messages) {
     const answerEnd = prefix.length + body.length;
     body += "\n";
 
-    if (sourceStart >= 0) {
-      attributions.push({ answerStart, answerEnd, sourceStart, sourceEnd });
-    }
+    attributions.push({ answerStart, answerEnd, sourceStart, sourceEnd });
   }
 
   if (!body) {
