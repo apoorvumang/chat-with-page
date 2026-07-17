@@ -26,23 +26,23 @@ Covers two regressions:
 - **every attribution highlight resolves**, including headings / nav links.
 
 ```bash
-npm install        # first time — downloads Playwright
-npx playwright install chromium
+npm install        # first time — installs Playwright
+npm run setup      # downloads Chromium + vendors the extra libs (no root)
 npm run test:e2e
 ```
 
 ### Note on system libraries
 
-Headless Chromium needs a few shared libs. On a minimal box you may hit
-`libgbm.so.1: cannot open shared object file`. With root:
-`npx playwright install-deps chromium`. Without root, fetch just the missing
-libs and point `LD_LIBRARY_PATH` at them:
+Headless Chromium needs a couple of shared libs (`libgbm.so.1`,
+`libwayland-server.so.0`) that aren't always installed system-wide. `npm run
+setup` handles this **without root**: `setup-libs.sh` uses `apt-get download`
+(no root needed) to fetch just those packages and extracts the `.so` files into
+a gitignored `_libs/flat/`. `e2e.mjs` auto-detects that directory and puts it on
+`LD_LIBRARY_PATH` for the child Chromium process — so `npm run test:e2e` just
+works afterward.
 
-```bash
-apt-get download libgbm1 libwayland-server0   # no root needed
-for d in *.deb; do dpkg-deb -x "$d" ./_libs; done
-LD_LIBRARY_PATH="$PWD/_libs/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" npm run test:e2e
-```
+If you *do* have root, `npx playwright install-deps chromium` is the standard
+alternative and makes `setup-libs.sh` unnecessary.
 
 ## What these tests do NOT cover
 

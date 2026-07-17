@@ -1,10 +1,20 @@
 import { chromium } from "playwright";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-// Load the real content script (../content.js relative to this test file).
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// If setup-libs.sh vendored the extra shared libs (no-root environments),
+// point the child Chromium process at them automatically.
+const vendored = join(__dirname, "_libs", "flat");
+if (existsSync(vendored)) {
+  process.env.LD_LIBRARY_PATH = process.env.LD_LIBRARY_PATH
+    ? `${vendored}:${process.env.LD_LIBRARY_PATH}`
+    : vendored;
+}
+
+// Load the real content script (../content.js relative to this test file).
 const CONTENT_JS = readFileSync(join(__dirname, "..", "content.js"), "utf8");
 
 const SITES = [
@@ -119,7 +129,7 @@ for (const url of SITES) {
   });
   const label = url.replace(/^https?:\/\//, "");
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 40000 });
     await page.waitForTimeout(1200);
     await setupPage(page);
 
