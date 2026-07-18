@@ -61,6 +61,98 @@ body {
   letter-spacing: 0.5px;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.credits {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.auth {
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.auth-title {
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.auth-note {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.auth-note a,
+.auth-link,
+.powered a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.auth-note a:hover,
+.auth-link:hover,
+.powered a:hover {
+  text-decoration: underline;
+}
+
+.auth-form {
+  display: flex;
+  gap: 8px;
+}
+
+.auth-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--fg);
+  background: var(--bg);
+}
+.auth-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.auth-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--error);
+}
+
+.auth-privacy {
+  margin: 10px 0 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.auth-link {
+  font-size: 12px;
+}
+
+.powered {
+  padding: 6px 14px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.powered-action {
+  margin-left: 8px;
+  color: var(--muted) !important;
+}
+
 .ghost-btn {
   background: transparent;
   border: 1px solid var(--border);
@@ -146,6 +238,18 @@ body {
 .attrib:hover {
   filter: brightness(1.05);
   outline: 1px solid var(--attrib-border);
+}
+
+/* Weakly attributed claims: keep them clickable but visually quieter. */
+.attrib-low {
+  background: transparent;
+  border-bottom-style: dotted;
+}
+
+.msg-link {
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 .composer {

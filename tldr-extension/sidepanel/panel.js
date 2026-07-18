@@ -11,6 +11,13 @@ const els = {
   clearHl: document.getElementById("clear-hl"),
   notice: document.getElementById("notice"),
   toast: document.getElementById("toast"),
+  credits: document.getElementById("credits"),
+  auth: document.getElementById("auth"),
+  authForm: document.getElementById("auth-form"),
+  authKey: document.getElementById("auth-key"),
+  authConnect: document.getElementById("auth-connect"),
+  authError: document.getElementById("auth-error"),
+  disconnect: document.getElementById("disconnect"),
 };
 
 const state = {
@@ -19,6 +26,10 @@ const state = {
   history: [], // [{ role: "user" | "assistant", content }]
   invalidated: false,
   busy: false,
+  connected: false,
+  // Set when a selection arrives before the user has connected; the auto
+  // summary runs right after a successful connect.
+  pendingAutoSummary: false,
 };
 
 init();
@@ -32,6 +43,7 @@ async function init() {
 
   wireUI();
   watchTab();
+  await initAuth();
 
   // Pick up a selection captured before the panel finished loading.
   if (state.tabId != null) {
@@ -73,8 +85,93 @@ function applySeed(seed) {
   els.contextText.textContent = seed.text;
   setEnabled(true);
 
-  // Auto-summarize so the attribution round-trip is visible immediately.
-  runTurn("Summarize the selected text.", { echoUser: false });
+  // Auto-summarize so the attribution round-trip is visible immediately —
+  // once there's a TokenPath connection to run it through.
+  if (state.connected) {
+    runTurn("Summarize the selected text.", { echoUser: false });
+  } else {
+    state.pendingAutoSummary = true;
+  }
+}
+
+// --- TokenPath auth ---------------------------------------------------------
+
+async function initAuth() {
+  const { key } = await TokenPath.getAuth();
+  if (!key) {
+    setConnected(false);
+    return;
+  }
+  setConnected(true);
+  // Validate lazily: show the balance if the key works, drop to the auth
+  // card if it no longer does.
+  try {
+    updateCredits(await TokenPath.fetchCredits());
+  } catch (e) {
+    if (e instanceof TokenPath.Error && (e.status === 401 || e.status === 403)) {
+      await TokenPath.clearKey();
+      setConnected(false);
+      showAuthError("Your saved TokenPath key was rejected — paste a new one.");
+    }
+  }
+}
+
+async function onConnectSubmit(e) {
+  e.preventDefault();
+  const key = els.authKey.value.trim();
+  if (!key) return;
+
+  els.authConnect.disabled = true;
+  showAuthError(null);
+  try {
+    await TokenPath.setKey(key);
+    updateCredits(await TokenPath.fetchCredits()); // validates the key
+  } catch (err) {
+    await TokenPath.clearKey();
+    showAuthError(
+      err instanceof TokenPath.Error && (err.status === 401 || err.status === 403)
+        ? "That key was rejected. Copy a fresh tpk_… key from platform.tokenpath.ai."
+        : err.message || "Couldn't reach TokenPath."
+    );
+    els.authConnect.disabled = false;
+    return;
+  }
+
+  els.authKey.value = "";
+  els.authConnect.disabled = false;
+  setConnected(true);
+
+  if (state.context && state.pendingAutoSummary) {
+    state.pendingAutoSummary = false;
+    runTurn("Summarize the selected text.", { echoUser: false });
+  }
+}
+
+async function onDisconnect(e) {
+  e.preventDefault();
+  await TokenPath.clearKey();
+  setConnected(false);
+}
+
+function setConnected(connected) {
+  state.connected = connected;
+  els.auth.hidden = connected;
+  els.disconnect.hidden = !connected;
+  if (!connected) {
+    els.credits.hidden = true;
+    if (!state.context) els.authKey.focus();
+  }
+}
+
+function updateCredits(availableTokens) {
+  if (availableTokens == null) return;
+  els.credits.textContent = formatTokens(availableTokens) + " tokens";
+  els.credits.hidden = false;
+}
+
+function showAuthError(text) {
+  els.authError.hidden = !text;
+  els.authError.textContent = text || "";
 }
 
 function wireUI() {
@@ -101,6 +198,9 @@ function wireUI() {
       .sendMessage(state.tabId, { type: "clear-highlight" })
       .catch(() => {});
   });
+
+  els.authForm.addEventListener("submit", onConnectSubmit);
+  els.disconnect.addEventListener("click", onDisconnect);
 }
 
 function autoGrow() {
@@ -109,6 +209,14 @@ function autoGrow() {
 }
 
 async function runTurn(userText, { echoUser }) {
+  if (!state.connected) {
+    state.pendingAutoSummary = true;
+    els.auth.hidden = false;
+    showToast("Connect TokenPath to start chatting.");
+    els.authKey.focus();
+    return;
+  }
+
   if (echoUser) {
     state.history.push({ role: "user", content: userText });
     addMessage("user", userText);
@@ -118,22 +226,58 @@ async function runTurn(userText, { echoUser }) {
   els.send.disabled = true;
   const thinking = addThinking();
 
-  let result;
+  let result = null;
+  let failure = null;
   try {
     result = await askLLM(state.context, [
       ...state.history,
       ...(echoUser ? [] : [{ role: "user", content: userText }]),
     ]);
   } catch (e) {
-    result = { answer: "Something went wrong generating an answer.", attributions: [] };
+    failure = e;
   }
 
   thinking.remove();
-  state.history.push({ role: "assistant", content: result.answer });
-  addAnswer(result.answer, result.attributions || []);
+
+  if (failure) {
+    await renderFailure(failure);
+  } else {
+    state.history.push({ role: "assistant", content: result.answer });
+    addAnswer(result.answer, result.attributions || []);
+    updateCredits(result.creditsRemaining);
+  }
 
   state.busy = false;
   els.send.disabled = false;
+}
+
+// Turn an API failure into an actionable chat message.
+async function renderFailure(e) {
+  if (!(e instanceof TokenPath.Error)) {
+    addMessage("assistant", "Something went wrong generating an answer.");
+    return;
+  }
+  if (e.status === 401 || e.status === 403) {
+    await TokenPath.clearKey();
+    setConnected(false);
+    showAuthError("Your TokenPath key was rejected — paste a new one.");
+    addMessage("assistant", "Your TokenPath key was rejected. Reconnect to continue.");
+    return;
+  }
+  if (e.status === 402) {
+    addErrorMessage(
+      "You're out of TokenPath credits. ",
+      "Top up at platform.tokenpath.ai →",
+      TokenPath.PLATFORM_URL
+    );
+    updateCredits(0);
+    return;
+  }
+  if (e.status === 429) {
+    addMessage("assistant", "TokenPath is rate-limiting requests — try again in a few seconds.");
+    return;
+  }
+  addMessage("assistant", e.message || "TokenPath request failed.");
 }
 
 // --- Rendering --------------------------------------------------------------
@@ -144,6 +288,19 @@ function addMessage(role, text) {
   div.textContent = text;
   els.messages.appendChild(div);
   scrollToBottom();
+  return div;
+}
+
+// An assistant message whose tail is a clickable external link.
+function addErrorMessage(text, linkText, href) {
+  const div = addMessage("assistant", text);
+  const link = document.createElement("a");
+  link.className = "msg-link";
+  link.textContent = linkText;
+  link.href = href;
+  link.target = "_blank";
+  link.rel = "noreferrer";
+  div.appendChild(link);
   return div;
 }
 
@@ -179,7 +336,13 @@ function addAnswer(answer, attributions) {
     const span = document.createElement("span");
     span.className = "attrib";
     span.textContent = answer.slice(a.answerStart, a.answerEnd);
-    span.title = "Click to find this in the page";
+    if (Number.isFinite(a.confidence)) {
+      span.title =
+        Math.round(a.confidence * 100) + "% match — click to find in the page";
+      if (a.confidence < 0.35) span.classList.add("attrib-low");
+    } else {
+      span.title = "Click to find this in the page";
+    }
     span.addEventListener("click", () =>
       onAttribClick(a.sourceStart, a.sourceEnd)
     );
@@ -267,68 +430,35 @@ function showToast(text) {
 }
 
 // ============================================================================
-// STUB — replace with the real LLM + TokenPath integration.
+// askLLM — one authenticated round-trip to TokenPath's POST /v1/answer, which
+// generates a grounded answer and attributes it in the same call.
 //
-//   askLLM(context, messages) -> { answer, attributions }
-//   attributions: [{ answerStart, answerEnd, sourceStart, sourceEnd }]
+//   askLLM(context, messages) -> { answer, attributions, creditsRemaining }
+//   attributions: [{ answerStart, answerEnd, sourceStart, sourceEnd, confidence }]
 //     answerStart/answerEnd -> char offsets into `answer`
 //     sourceStart/sourceEnd -> char offsets into `context` (the extraction
 //                              string), which the content script maps to live
 //                              DOM nodes for highlighting.
 //
-// This stub summarizes by echoing the first sentence of each paragraph and
-// attributing each bullet back to its exact source span, so the highlight
-// round-trip is demonstrable without any API keys.
+// `context` is sent verbatim as `document` — never trimmed or re-normalized —
+// so the source offsets in the response index straight into it.
 // ============================================================================
 async function askLLM(context, messages) {
-  await new Promise((r) => setTimeout(r, 250));
+  const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
+  const question =
+    lastUserIndex === -1
+      ? "Summarize the selected text."
+      : messages[lastUserIndex].content;
+  // Prior turns only; the latest user turn travels as `question`.
+  const prior = messages
+    .slice(0, lastUserIndex === -1 ? messages.length : lastUserIndex)
+    .filter((m) => m.content && m.content.trim())
+    .slice(-40)
+    .map((m) => ({ role: m.role, content: m.content.slice(0, 10_000) }));
 
-  const lastUser = [...messages].reverse().find((m) => m.role === "user");
-  const question = lastUser ? lastUser.content : "";
-
-  const prefix =
-    "Here's a TLDR of the selected text" +
-    (question && !/summar/i.test(question) ? ` (re: "${question}")` : "") +
-    ":\n\n";
-
-  // Split into blocks on the "\n" separators, tracking each block's exact
-  // offset in `context` so attributions never rely on an ambiguous indexOf.
-  const blocks = [];
-  let cursor = 0;
-  for (const raw of context.split("\n")) {
-    const leading = raw.length - raw.trimStart().length;
-    const trimmed = raw.trim();
-    if (trimmed) blocks.push({ text: trimmed, start: cursor + leading });
-    cursor += raw.length + 1; // +1 for the consumed "\n"
-  }
-
-  const attributions = [];
-  let body = "";
-
-  for (const block of blocks.slice(0, 6)) {
-    // First sentence of the block (offsets are exact relative to block.start).
-    const m = block.text.match(/^[\s\S]*?[.!?](?=\s|$)/);
-    const sentence = m ? m[0] : block.text;
-    if (!sentence) continue;
-
-    const sourceStart = block.start;
-    const sourceEnd = block.start + sentence.length;
-
-    const bulletPrefix = "• ";
-    const answerStart = prefix.length + body.length + bulletPrefix.length;
-    body += bulletPrefix + sentence;
-    const answerEnd = prefix.length + body.length;
-    body += "\n";
-
-    attributions.push({ answerStart, answerEnd, sourceStart, sourceEnd });
-  }
-
-  if (!body) {
-    return {
-      answer: "I couldn't find any content in the selection to summarize.",
-      attributions: [],
-    };
-  }
-
-  return { answer: prefix + body.trimEnd(), attributions };
+  return TokenPath.answer({
+    document: context.slice(0, TokenPath.MAX_DOCUMENT_CHARS),
+    question: question.slice(0, 10_000),
+    messages: prior,
+  });
 }

@@ -9,10 +9,50 @@
   <body>
     <header class="header">
       <span class="logo">TLDR</span>
-      <button id="clear-hl" class="ghost-btn" title="Clear page highlight">
-        Clear highlight
-      </button>
+      <div class="header-right">
+        <span
+          id="credits"
+          class="credits"
+          title="TokenPath tokens remaining"
+          hidden
+        ></span>
+        <button id="clear-hl" class="ghost-btn" title="Clear page highlight">
+          Clear highlight
+        </button>
+      </div>
     </header>
+
+    <section id="auth" class="auth" hidden>
+      <div class="auth-title">Sign in with TokenPath</div>
+      <p class="auth-note">
+        Answers are generated and attributed by
+        <a href="https://tokenpath.ai" target="_blank" rel="noreferrer">TokenPath</a>.
+        Paste an API key to connect — new accounts get 10M free tokens.
+      </p>
+      <form id="auth-form" class="auth-form">
+        <input
+          id="auth-key"
+          class="auth-input"
+          type="password"
+          placeholder="tpk_live_…"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button id="auth-connect" type="submit" class="send-btn">Connect</button>
+      </form>
+      <div id="auth-error" class="auth-error" hidden></div>
+      <p class="auth-privacy">
+        Text you select and your questions are sent to TokenPath to generate
+        and attribute answers. The page itself is never uploaded.
+      </p>
+      <a
+        class="auth-link"
+        href="https://platform.tokenpath.ai"
+        target="_blank"
+        rel="noreferrer"
+        >Get an API key at platform.tokenpath.ai →</a
+      >
+    </section>
 
     <section id="context" class="context">
       <div class="context-label">Selected from page</div>
@@ -34,8 +74,16 @@
       <button id="send" type="submit" class="send-btn">Send</button>
     </form>
 
+    <footer class="powered">
+      Powered by
+      <a href="https://tokenpath.ai" target="_blank" rel="noreferrer">TokenPath</a>
+      — token-level attribution
+      <a id="disconnect" class="powered-action" href="#" hidden>Disconnect</a>
+    </footer>
+
     <div id="toast" class="toast" hidden></div>
 
+    <script src="tokenpath.js"></script>
     <script src="panel.js"></script>
   </body>
 </html>

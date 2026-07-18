@@ -20,29 +20,44 @@ highlight that text in the page. Type follow-up questions in the box.
 
 ## Status
 
-Working end-to-end **except** the LLM call, which is a stub. No API keys are
-needed to build or test the extension.
+Wired end-to-end to the live TokenPath platform (see
+[`tokenpath-integration.md`](./tokenpath-integration.md), Phase 0). On first
+use the panel asks you to connect a TokenPath API key — get one (with 10M free
+tokens) at [platform.tokenpath.ai](https://platform.tokenpath.ai). Answers are
+generated **and** attributed by one authenticated call to
+`POST https://api.tokenpath.ai/v1/answer`; there is no separate LLM key.
 
-## Wiring the real LLM + TokenPath
+To point the extension at staging or a local backend, set an override in the
+panel's DevTools console:
+
+```js
+chrome.storage.local.set({ tokenpathBaseUrl: "http://localhost:8000" })
+```
+
+## How the wiring works
 
 Everything routes through one function — `askLLM(context, messages)` at the
-bottom of [`tldr-extension/sidepanel/panel.js`](./tldr-extension/sidepanel/panel.js).
-Replace its body with your real call. Its contract:
+bottom of [`tldr-extension/sidepanel/panel.js`](./tldr-extension/sidepanel/panel.js),
+backed by the API client in
+[`tldr-extension/sidepanel/tokenpath.js`](./tldr-extension/sidepanel/tokenpath.js).
+Its contract:
 
 ```js
 askLLM(context, messages) -> {
   answer: string,
-  attributions: [{ answerStart, answerEnd, sourceStart, sourceEnd }]
+  attributions: [{ answerStart, answerEnd, sourceStart, sourceEnd, confidence }],
+  creditsRemaining: number | null
 }
 ```
 
-- `context` is the exact extracted selection string.
+- `context` is the exact extracted selection string, sent verbatim as the
+  `document` — never trimmed or re-normalized, so response offsets index
+  straight into it.
 - `answerStart` / `answerEnd` are char offsets into `answer`.
 - `sourceStart` / `sourceEnd` are char offsets into `context`; the content
-  script maps these to live DOM nodes for highlighting. **Do not re-normalize
-  whitespace** on the answer side — offsets must refer to `context` verbatim.
-
-Nothing else in the UI or content script needs to change.
+  script maps these to live DOM nodes for highlighting.
+- Only the extracted selection and your questions are sent to TokenPath; the
+  DOM node map never leaves the content script.
 
 ## Layout
 
