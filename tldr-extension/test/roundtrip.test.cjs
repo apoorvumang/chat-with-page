@@ -9,18 +9,11 @@ const assert = require("assert");
 function isWs(ch) {
   return ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === " ";
 }
-function isSentenceEnd(ch) {
-  return ch === "." || ch === "!" || ch === "?" || ch === "\n";
-}
-function snapToSentence(text, start, end) {
+function clampSpan(text, start, end) {
   const n = text.length;
-  start = Math.max(0, Math.min(start, n));
-  end = Math.max(start, Math.min(end, n));
-  let s = start;
-  while (s > 0 && !isSentenceEnd(text[s - 1])) s--;
-  while (s < end && isWs(text[s])) s++;
-  let e = end;
-  while (e < n && !isSentenceEnd(text[e - 1])) e++;
+  let s = Math.max(0, Math.min(start, n));
+  let e = Math.max(s, Math.min(end, n));
+  while (s < e && isWs(text[s])) s++;
   while (e > s && isWs(text[e - 1])) e--;
   return { start: s, end: e };
 }
@@ -45,7 +38,7 @@ function lastEntryAtOrBefore(map, offset) {
 
 // resolve a source [start,end) the way content.js highlightRange does
 function resolve(text, map, rawStart, rawEnd) {
-  let { start, end } = snapToSentence(text, rawStart, rawEnd);
+  let { start, end } = clampSpan(text, rawStart, rawEnd);
   if (end <= start) return null;
   const startEntry = findEntry(map, start) || firstEntryAtOrAfter(map, start);
   const endEntry = findEntry(map, end - 1) || lastEntryAtOrBefore(map, end - 1);
@@ -126,5 +119,15 @@ const gap = heading.length; // index of "\n"
 const rGap = resolve(text, map, gap, gap + 5);
 assert.ok(rGap, "gap-adjacent range resolves");
 console.log("PASS: range touching the separator gap clamps to a real entry");
+
+// 5) sub-sentence spans stay exact — no sentence expansion. TokenPath returns
+// character-perfect source spans; the client must not blur them.
+const word = "first sentence";
+const wordStart = text.indexOf(word);
+const rWord = resolve(text, map, wordStart, wordStart + word.length);
+assert.ok(rWord, "sub-sentence span resolves");
+assert.strictEqual(rWord.snappedText, word, "span is not expanded to the sentence");
+assert.strictEqual(rWord.nodeStart, 500 + (wordStart - (heading.length + 1)));
+console.log("PASS: sub-sentence spans highlight exactly, with no sentence snapping");
 
 console.log("\nAll round-trip assertions passed.");

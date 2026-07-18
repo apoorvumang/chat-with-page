@@ -202,7 +202,7 @@
   function highlightRange(rawStart, rawEnd) {
     if (!extraction || !extraction.map.length) return false;
 
-    let { start, end } = snapToSentence(extraction.text, rawStart, rawEnd);
+    let { start, end } = clampSpan(extraction.text, rawStart, rawEnd);
     if (end <= start) return false;
 
     const map = extraction.map;
@@ -241,27 +241,20 @@
     return true;
   }
 
-  // Expand [start, end) outward to sentence boundaries; token-level spans are
-  // noisy and this is the default UX.
-  function snapToSentence(text, start, end) {
+  // Highlight exactly the span TokenPath resolved — it already snaps to word
+  // boundaries and verbatim source occurrences server-side, so any client-side
+  // expansion (e.g. to sentence bounds) would only blur the precision that
+  // token-level attribution buys. Just clamp into range and keep the ends off
+  // whitespace / the synthetic "\n" block separators.
+  function clampSpan(text, start, end) {
     const n = text.length;
-    start = Math.max(0, Math.min(start, n));
-    end = Math.max(start, Math.min(end, n));
+    let s = Math.max(0, Math.min(start, n));
+    let e = Math.max(s, Math.min(end, n));
 
-    let s = start;
-    while (s > 0 && !isSentenceEnd(text[s - 1])) s--;
-    while (s < end && isWs(text[s])) s++;
-
-    let e = end;
-    while (e < n && !isSentenceEnd(text[e - 1])) e++;
-    // Don't let the range end on trailing whitespace / a "\n" block separator.
+    while (s < e && isWs(text[s])) s++;
     while (e > s && isWs(text[e - 1])) e--;
 
     return { start: s, end: e };
-  }
-
-  function isSentenceEnd(ch) {
-    return ch === "." || ch === "!" || ch === "?" || ch === "\n";
   }
 
   // Binary search: entry with start <= offset < end.
