@@ -1,5 +1,13 @@
 # Spec: TokenPath Integration for the TLDR Extension
 
+> **Status (2026-07): Phase 0 implemented.** The TokenPath backend gained
+> `POST /v1/answer` (combined generate + attribute, decision D1a) and this
+> extension is wired to it with pasted-key auth (D5). Generation runs on
+> `google/gemini-3.1-flash-lite` via OpenRouter (D3); span selection is
+> server-side via `[[citation marks]]` the model emits, with sentence-level
+> fallback (D4). Sign-in is required before the first query (D2). Phase 1
+> (OAuth PKCE) and D6/D7 remain open.
+
 ## Purpose
 
 Wire the TLDR Chrome extension (see [`spec.md`](./spec.md)) to the real TokenPath
