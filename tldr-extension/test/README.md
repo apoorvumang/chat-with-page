@@ -1,51 +1,79 @@
 # Tests
 
-Two levels, both exercising the real `content.js` — the extraction, node-map,
-sentence-snap, and offset round-trip logic where all the tricky behavior lives.
+The suite has pure/unit coverage for offset math, summary policy, and background
+capture orchestration, plus Playwright integration coverage for the side panel
+and real content script.
 
-## `roundtrip.test.cjs` — pure unit test (no browser)
-
-Asserts the offset math on a synthetic extraction + node map: exact source
-slices, heading-with-no-period resolution (the block-separator gap bug), and
-raw-offset mapping into the correct node.
+## Unit suite
 
 ```bash
 npm run test:unit
 ```
 
-## `e2e.mjs` — live-site integration test (headless Chromium)
+This runs three files:
 
-Loads real pages, injects `content.js` behind a minimal `chrome` shim (the same
-way the extension runs it — in a CSP-exempt isolated world), then drives the
-exact message flow the extension uses: set a selection → dispatch `contextmenu`
-→ `capture-selection` → `highlight`, and reads back `CSS.highlights` to confirm
-the correct span was highlighted.
+- **`roundtrip.test.cjs`** checks canonical extraction offsets against raw DOM
+  offsets, including synthetic block separators, headings, and exact
+  sub-sentence ranges without sentence expansion.
+- **`panel-logic.test.cjs`** checks the 24-word automatic-summary cutoff,
+  adaptive word and token budgets, the deterministic “TL;DR is shorter” guard,
+  code-point-safe truncation around emoji, and whitespace-free CJK handling.
+- **`background.test.cjs`** holds `chrome.sidePanel.open()` unresolved and proves
+  that capture still proceeds immediately. It also verifies exact-frame warm
+  injection, retries for missing receivers and stale “page changed” responses,
+  Gmail or nested-frame routing, click-order race handling, and seed metadata.
 
-Covers two regressions:
-- **single-text-node selections** extract text (the x.com failure).
-- **every attribution highlight resolves**, including headings / nav links.
+## Browser integration
 
 ```bash
-npm install        # first time — installs Playwright
-npm run setup      # downloads Chromium + vendors the extra libs (no root)
+npm install        # first run
+npm run setup      # install Chromium and any vendored Linux libraries
 npm run test:e2e
 ```
 
-### Note on system libraries
+`e2e.mjs` loads representative fixtures and public pages, injects the real
+scripts behind a small Chrome API shim, and drives selection → `contextmenu` →
+capture → fixed-span click or source-offset highlight. It covers:
 
-Headless Chromium needs a couple of shared libs (`libgbm.so.1`,
-`libwayland-server.so.0`) that aren't always installed system-wide. `npm run
-setup` handles this **without root**: `setup-libs.sh` uses `apt-get download`
-(no root needed) to fetch just those packages and extracts the `.so` files into
-a gitignored `_libs/flat/`. `e2e.mjs` auto-detects that directory and puts it on
-`LD_LIBRARY_PATH` for the child Chromium process — so `npm run test:e2e` just
-works afterward.
+- side-panel bootstrap while `/credits` never resolves, adaptive summary
+  payloads, fixed server-span rendering, stale-seed rejection, and routing a
+  click to the original tab and frame;
+- a Gmail-shaped nested scroll pane whose complete message subtree is replaced
+  between capture and highlight, including repeated text and inline elements;
+- exact Range capture when Chrome's flattened selection hint omits an invisible
+  character;
+- a Substack-shaped late-injection selection spanning header and body, including
+  CSS-uppercase dates, `user-select:none` reaction controls, and a visibly
+  rendered `aria-hidden` ancestor;
+- current X Article DraftJS selectors and blocks, repeated text, and a full
+  article subtree rerender;
+- X post identity across detach and reorder when another post contains the same
+  text, plus rejection of a connected React Text node whose contents changed;
+- a live public X post body, including a React-rendered span replacement; and
+- single-node and multi-block extraction and highlighting on Example,
+  Wikipedia, GNU, MDN, Hacker News, a live Substack post, and a live X profile.
 
-If you *do* have root, `npx playwright install-deps chromium` is the standard
-alternative and makes `setup-libs.sh` unnecessary.
+To run both levels:
 
-## What these tests do NOT cover
+```bash
+npm test
+```
 
-The Chrome orchestration glue — `chrome.contextMenus`, `chrome.sidePanel.open`,
-and cross-context messaging in `background.js` / `panel.js`. Those APIs can't be
-driven headlessly and still require a manual load-unpacked click-through.
+## Linux browser dependencies
+
+Headless Chromium may need `libgbm.so.1` and `libwayland-server.so.0`.
+`setup-libs.sh` downloads and extracts them without root into `_libs/flat/`, and
+`e2e.mjs` adds that directory to `LD_LIBRARY_PATH`. If system installation is
+available, `npx playwright install-deps chromium` is the standard alternative.
+
+## Still manual
+
+The tests mock rather than launch a packaged Chrome extension, so a final
+load-unpacked pass should verify the real context menu, side panel, TokenPath
+HTTP and authentication flow, clickable fixed attribution spans, nested Gmail
+scrolling, and detached-DOM unique remapping. Restricted pages such as
+`chrome://` remain unavailable to content scripts by design.
+
+Deterministic fixture failures set a nonzero exit code. Public-site smoke checks
+remain diagnostic because network availability and third-party markup can
+change independently of the extension.

@@ -52,20 +52,24 @@ const TokenPath = {
 
   // POST /v1/answer — generate a grounded answer and attribute it.
   // Returns { answer, attributions, creditsRemaining } in the panel's shape.
-  async answer({ document, question, messages }) {
-    const body = await this._request("POST", "/v1/answer", {
+  async answer({ document, question, messages, maxOutputTokens }) {
+    const payload = {
       document,
       question,
       messages,
-    });
+    };
+    if (Number.isFinite(maxOutputTokens)) {
+      payload.max_output_tokens = Math.trunc(maxOutputTokens);
+    }
+    const body = await this._request("POST", "/v1/answer", payload);
     const attributions = (body.attributions || [])
-      .filter((s) => s.source) // unattributed claims aren't clickable
-      .map((s) => ({
-        answerStart: s.answer.start,
-        answerEnd: s.answer.end,
-        sourceStart: s.source.start,
-        sourceEnd: s.source.end,
-        confidence: s.source.confidence,
+      .filter((span) => span.source)
+      .map((span) => ({
+        answerStart: span.answer.start,
+        answerEnd: span.answer.end,
+        sourceStart: span.source.start,
+        sourceEnd: span.source.end,
+        confidence: span.source.confidence,
       }));
     return {
       answer: body.answer,

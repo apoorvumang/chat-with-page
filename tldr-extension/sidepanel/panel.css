@@ -229,6 +229,13 @@ body {
   font-style: italic;
 }
 
+.msg.assistant.note {
+  color: var(--muted);
+  background: transparent;
+  border-style: dashed;
+  font-size: 12.5px;
+}
+
 .attrib {
   background: var(--attrib-bg);
   border-bottom: 1.5px dashed var(--attrib-border);

@@ -1,6 +1,6 @@
 // TLDR — side panel chat UI.
-// Receives only { text } from the page and only ever sends back
-// { start, end } char offsets. The node map lives in the content script.
+// Receives only { text } from the page and sends back { start, end } character
+// offsets. The DOM node map never leaves the selected content-script frame.
 
 const els = {
   contextText: document.getElementById("context-text"),
@@ -22,28 +22,70 @@ const els = {
 
 const state = {
   tabId: null,
+  windowId: null,
+  frameId: 0,
+  captureId: null,
+  capturedAt: 0,
   context: "",
   history: [], // [{ role: "user" | "assistant", content }]
   invalidated: false,
   busy: false,
   connected: false,
-  // Set when a selection arrives before the user has connected; the auto
-  // summary runs right after a successful connect.
-  pendingAutoSummary: false,
+  contextVersion: 0,
+  authEpoch: 0,
+  highlightEpoch: 0,
+  highlightedTarget: null,
+  // Summary request held until a TokenPath key is available.
+  pendingAutoSummary: null,
 };
 
 init();
 
 async function init() {
+  wireUI();
+  watchTab();
+
+  // Install the live listener before *any* await, including the active-tab
+  // lookup. A newly opened panel can otherwise miss a very fast capture.
+  const earlyCaptures = [];
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.type !== "selection-captured") return;
+    if (state.windowId == null) {
+      earlyCaptures.push(msg);
+      return;
+    }
+    if (
+      msg.windowId != null &&
+      msg.windowId !== state.windowId
+    ) {
+      return;
+    }
+    // A side panel can persist while its window switches tabs. The newest
+    // explicit TLDR capture becomes this panel's target tab + frame.
+    applySeed(msg);
+  });
+
+  const authReady = initAuth();
   const [tab] = await chrome.tabs.query({
     active: true,
     currentWindow: true,
   });
   state.tabId = tab?.id ?? null;
+  state.windowId = tab?.windowId ?? null;
 
-  wireUI();
-  watchTab();
-  await initAuth();
+  // Runtime messages are broadcast to every open panel, so keep only captures
+  // for this panel's window and apply the newest one first.
+  const earlyCapture = earlyCaptures
+    .filter(
+      (msg) =>
+        state.windowId == null ||
+        msg.windowId == null ||
+        msg.windowId === state.windowId
+    )
+    .sort((a, b) => (Number(b.capturedAt) || 0) - (Number(a.capturedAt) || 0))[0];
+  if (earlyCapture) {
+    applySeed(earlyCapture);
+  }
 
   // Pick up a selection captured before the panel finished loading.
   if (state.tabId != null) {
@@ -51,13 +93,8 @@ async function init() {
     const seed = stored[seedKey(state.tabId)];
     if (seed) applySeed(seed);
   }
-
-  // Live updates if the user triggers TLDR again while the panel is open.
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg?.type === "selection-captured" && msg.tabId === state.tabId) {
-      applySeed(msg);
-    }
-  });
+  await authReady;
+  maybeRunAutoSummary();
 }
 
 function seedKey(tabId) {
@@ -65,68 +102,128 @@ function seedKey(tabId) {
 }
 
 function applySeed(seed) {
+  if (seed.captureId && seed.captureId === state.captureId) return false;
+  if (
+    Number.isFinite(seed.capturedAt) &&
+    seed.capturedAt < state.capturedAt
+  ) {
+    return false;
+  }
+  cancelHighlightAndClear();
+  state.captureId = seed.captureId || null;
+  state.capturedAt = Number(seed.capturedAt) || Date.now();
+  state.tabId = seed.tabId ?? state.tabId;
+  state.frameId = Number.isInteger(seed.frameId) ? seed.frameId : 0;
+
   if (seed.error) {
+    state.context = "";
+    state.history = [];
+    state.pendingAutoSummary = null;
+    state.contextVersion++;
+    els.messages.innerHTML = "";
     els.contextText.textContent = seed.error;
     setEnabled(false);
-    return;
+    return true;
   }
   if (!seed.text) {
+    state.context = "";
+    state.history = [];
+    state.pendingAutoSummary = null;
+    state.contextVersion++;
+    els.messages.innerHTML = "";
     els.contextText.textContent = "No text was captured.";
     setEnabled(false);
-    return;
+    return true;
   }
 
   // A fresh capture clears any prior invalidation and chat.
   state.context = seed.text;
   state.invalidated = false;
   state.history = [];
+  state.contextVersion++;
+  state.pendingAutoSummary = null;
   hideNotice();
   els.messages.innerHTML = "";
   els.contextText.textContent = seed.text;
   setEnabled(true);
 
-  // Auto-summarize so the attribution round-trip is visible immediately —
-  // once there's a TokenPath connection to run it through.
-  if (state.connected) {
-    runTurn("Summarize the selected text.", { echoUser: false });
-  } else {
-    state.pendingAutoSummary = true;
+  const summary = TldrPanelLogic.buildSummaryRequest(seed.text);
+  if (summary.skip) {
+    addMessage(
+      "assistant note",
+      "Already concise — ask anything about this selection."
+    );
+    return true;
   }
+  state.pendingAutoSummary = summary;
+  maybeRunAutoSummary();
+  return true;
+}
+
+function maybeRunAutoSummary() {
+  if (
+    !state.connected ||
+    state.busy ||
+    !state.context ||
+    !state.pendingAutoSummary
+  ) {
+    return;
+  }
+  const summary = state.pendingAutoSummary;
+  state.pendingAutoSummary = null;
+  runTurn(summary.prompt, {
+    echoUser: false,
+    summary,
+    maxOutputTokens: summary.maxOutputTokens,
+  });
 }
 
 // --- TokenPath auth ---------------------------------------------------------
 
 async function initAuth() {
+  const authEpoch = ++state.authEpoch;
   const { key } = await TokenPath.getAuth();
+  if (authEpoch !== state.authEpoch) return;
   if (!key) {
     setConnected(false);
     return;
   }
   setConnected(true);
-  // Validate lazily: show the balance if the key works, drop to the auth
-  // card if it no longer does.
-  try {
-    updateCredits(await TokenPath.fetchCredits());
-  } catch (e) {
-    if (e instanceof TokenPath.Error && (e.status === 401 || e.status === 403)) {
-      await TokenPath.clearKey();
-      setConnected(false);
-      showAuthError("Your saved TokenPath key was rejected — paste a new one.");
-    }
-  }
+  // Refresh/validate in the background. Selection display and panel bootstrap
+  // must never wait on this unrelated network request.
+  TokenPath.fetchCredits()
+    .then((credits) => {
+      if (authEpoch === state.authEpoch) updateCredits(credits);
+    })
+    .catch(async (e) => {
+      if (
+        authEpoch === state.authEpoch &&
+        e instanceof TokenPath.Error &&
+        (e.status === 401 || e.status === 403)
+      ) {
+        await TokenPath.clearKey();
+        if (authEpoch !== state.authEpoch) return;
+        setConnected(false);
+        showAuthError("Your saved TokenPath key was rejected — paste a new one.");
+      }
+    });
 }
 
 async function onConnectSubmit(e) {
   e.preventDefault();
   const key = els.authKey.value.trim();
   if (!key) return;
+  const authEpoch = ++state.authEpoch;
 
   els.authConnect.disabled = true;
   showAuthError(null);
   try {
     await TokenPath.setKey(key);
-    updateCredits(await TokenPath.fetchCredits()); // validates the key
+    const credits = await TokenPath.fetchCredits(); // validates the key
+    if (authEpoch !== state.authEpoch) return;
+    updateCredits(credits);
   } catch (err) {
+    if (authEpoch !== state.authEpoch) return;
     await TokenPath.clearKey();
     showAuthError(
       err instanceof TokenPath.Error && (err.status === 401 || err.status === 403)
@@ -140,15 +237,12 @@ async function onConnectSubmit(e) {
   els.authKey.value = "";
   els.authConnect.disabled = false;
   setConnected(true);
-
-  if (state.context && state.pendingAutoSummary) {
-    state.pendingAutoSummary = false;
-    runTurn("Summarize the selected text.", { echoUser: false });
-  }
+  maybeRunAutoSummary();
 }
 
 async function onDisconnect(e) {
   e.preventDefault();
+  state.authEpoch++;
   await TokenPath.clearKey();
   setConnected(false);
 }
@@ -160,6 +254,8 @@ function setConnected(connected) {
   if (!connected) {
     els.credits.hidden = true;
     if (!state.context) els.authKey.focus();
+  } else {
+    maybeRunAutoSummary();
   }
 }
 
@@ -193,10 +289,12 @@ function wireUI() {
   });
 
   els.clearHl.addEventListener("click", () => {
-    if (state.tabId == null) return;
-    chrome.tabs
-      .sendMessage(state.tabId, { type: "clear-highlight" })
-      .catch(() => {});
+    state.highlightEpoch++;
+    const fallback =
+      state.tabId == null
+        ? null
+        : { tabId: state.tabId, frameId: state.frameId };
+    clearActiveHighlight(fallback).catch(() => {});
   });
 
   els.authForm.addEventListener("submit", onConnectSubmit);
@@ -208,9 +306,12 @@ function autoGrow() {
   els.input.style.height = Math.min(els.input.scrollHeight, 120) + "px";
 }
 
-async function runTurn(userText, { echoUser }) {
+async function runTurn(
+  userText,
+  { echoUser, summary = null, maxOutputTokens = null }
+) {
   if (!state.connected) {
-    state.pendingAutoSummary = true;
+    if (summary) state.pendingAutoSummary = summary;
     els.auth.hidden = false;
     showToast("Connect TokenPath to start chatting.");
     els.authKey.focus();
@@ -222,6 +323,12 @@ async function runTurn(userText, { echoUser }) {
     addMessage("user", userText);
   }
 
+  const context = state.context;
+  const contextVersion = state.contextVersion;
+  const history = [
+    ...state.history,
+    ...(echoUser ? [] : [{ role: "user", content: userText }]),
+  ];
   state.busy = true;
   els.send.disabled = true;
   const thinking = addThinking();
@@ -229,26 +336,52 @@ async function runTurn(userText, { echoUser }) {
   let result = null;
   let failure = null;
   try {
-    result = await askLLM(state.context, [
-      ...state.history,
-      ...(echoUser ? [] : [{ role: "user", content: userText }]),
-    ]);
+    result = await askLLM(context, history, { maxOutputTokens });
   } catch (e) {
     failure = e;
   }
 
   thinking.remove();
 
+  // A new page selection arrived while this request was running. Never append
+  // the old answer to the new context; release the slot and start its summary.
+  if (contextVersion !== state.contextVersion) {
+    state.busy = false;
+    els.send.disabled = !state.context;
+    maybeRunAutoSummary();
+    return;
+  }
+
   if (failure) {
+    // A failed visible user turn has no assistant counterpart and must not
+    // leak into the next request's conversational history.
+    if (echoUser) state.history.pop();
     await renderFailure(failure);
   } else {
-    state.history.push({ role: "assistant", content: result.answer });
-    addAnswer(result.answer, result.attributions || []);
+    const answer = summary
+      ? TldrPanelLogic.enforceShorterSummary(
+          result.answer,
+          context,
+          summary.maxUnits
+        )
+      : result.answer;
+    state.history.push({ role: "assistant", content: answer });
+    addAnswer(
+      answer,
+      answer === result.answer ? result.attributions || [] : [],
+      {
+        tabId: state.tabId,
+        frameId: state.frameId,
+        captureId: state.captureId,
+        contextVersion: state.contextVersion,
+      }
+    );
     updateCredits(result.creditsRemaining);
   }
 
   state.busy = false;
-  els.send.disabled = false;
+  els.send.disabled = !state.context;
+  maybeRunAutoSummary();
 }
 
 // Turn an API failure into an actionable chat message.
@@ -258,7 +391,9 @@ async function renderFailure(e) {
     return;
   }
   if (e.status === 401 || e.status === 403) {
+    const authEpoch = ++state.authEpoch;
     await TokenPath.clearKey();
+    if (authEpoch !== state.authEpoch) return;
     setConnected(false);
     showAuthError("Your TokenPath key was rejected — paste a new one.");
     addMessage("assistant", "Your TokenPath key was rejected. Reconnect to continue.");
@@ -313,41 +448,45 @@ function addThinking() {
   return div;
 }
 
-// Render the answer, turning attributions into clickable spans.
-function addAnswer(answer, attributions) {
+// Render the answer, turning server-provided attributions into clickable spans.
+function addAnswer(answer, attributions, source) {
   const div = document.createElement("div");
   div.className = "msg assistant";
 
   const sorted = [...attributions]
     .filter(
-      (a) =>
-        Number.isFinite(a.answerStart) &&
-        Number.isFinite(a.answerEnd) &&
-        a.answerEnd > a.answerStart
+      (item) =>
+        Number.isFinite(item.answerStart) &&
+        Number.isFinite(item.answerEnd) &&
+        item.answerEnd > item.answerStart &&
+        Number.isFinite(item.sourceStart) &&
+        Number.isFinite(item.sourceEnd) &&
+        item.sourceEnd > item.sourceStart
     )
     .sort((a, b) => a.answerStart - b.answerStart);
 
   let cursor = 0;
-  for (const a of sorted) {
-    if (a.answerStart < cursor) continue; // skip overlaps
-    if (a.answerStart > cursor) {
-      div.appendChild(document.createTextNode(answer.slice(cursor, a.answerStart)));
+  for (const item of sorted) {
+    if (item.answerStart < cursor || item.answerStart >= answer.length) continue;
+    const answerEnd = Math.min(item.answerEnd, answer.length);
+    if (item.answerStart > cursor) {
+      div.appendChild(document.createTextNode(answer.slice(cursor, item.answerStart)));
     }
     const span = document.createElement("span");
     span.className = "attrib";
-    span.textContent = answer.slice(a.answerStart, a.answerEnd);
-    if (Number.isFinite(a.confidence)) {
+    span.textContent = answer.slice(item.answerStart, answerEnd);
+    if (Number.isFinite(item.confidence)) {
       span.title =
-        Math.round(a.confidence * 100) + "% match — click to find in the page";
-      if (a.confidence < 0.35) span.classList.add("attrib-low");
+        Math.round(item.confidence * 100) + "% match — click to find in the page";
+      if (item.confidence < 0.35) span.classList.add("attrib-low");
     } else {
       span.title = "Click to find this in the page";
     }
     span.addEventListener("click", () =>
-      onAttribClick(a.sourceStart, a.sourceEnd)
+      onAttribClick(item.sourceStart, item.sourceEnd, source)
     );
     div.appendChild(span);
-    cursor = a.answerEnd;
+    cursor = answerEnd;
   }
   if (cursor < answer.length) {
     div.appendChild(document.createTextNode(answer.slice(cursor)));
@@ -357,30 +496,85 @@ function addAnswer(answer, attributions) {
   scrollToBottom();
 }
 
-function scrollToBottom() {
-  els.messages.scrollTop = els.messages.scrollHeight;
+function isCurrentHighlight(source, epoch) {
+  return (
+    epoch === state.highlightEpoch &&
+    !state.invalidated &&
+    source.contextVersion === state.contextVersion &&
+    source.captureId === state.captureId
+  );
 }
 
-async function onAttribClick(start, end) {
+function clearHighlightTarget(target) {
+  if (!target || target.tabId == null) return Promise.resolve();
+  return chrome.tabs
+    .sendMessage(
+      target.tabId,
+      {
+        type: "clear-highlight",
+        captureId: target.captureId || null,
+      },
+      { frameId: Number.isInteger(target.frameId) ? target.frameId : 0 }
+    )
+    .catch(() => {});
+}
+
+async function clearActiveHighlight(fallback = null) {
+  const target = state.highlightedTarget || fallback;
+  state.highlightedTarget = null;
+  await clearHighlightTarget(target);
+}
+
+function cancelHighlightAndClear() {
+  state.highlightEpoch++;
+  clearActiveHighlight().catch(() => {});
+}
+
+async function onAttribClick(start, end, source) {
   if (state.invalidated) {
     showToast("The page navigated — re-select and choose TLDR again.");
     return;
   }
-  if (state.tabId == null || !Number.isFinite(start) || !Number.isFinite(end)) {
+  if (
+    source.tabId == null ||
+    !Number.isFinite(start) ||
+    !Number.isFinite(end)
+  ) {
     return;
   }
+
+  const epoch = ++state.highlightEpoch;
+  await clearActiveHighlight();
+  if (!isCurrentHighlight(source, epoch)) return;
   try {
-    const res = await chrome.tabs.sendMessage(state.tabId, {
-      type: "highlight",
-      start,
-      end,
-    });
-    if (!res || !res.ok) {
-      showToast("Couldn't locate that text in the page.");
+    const response = await chrome.tabs.sendMessage(
+      source.tabId,
+      {
+        type: "highlight",
+        start,
+        end,
+        captureId: source.captureId,
+      },
+      { frameId: source.frameId }
+    );
+    if (!isCurrentHighlight(source, epoch)) {
+      await clearHighlightTarget(source);
+      return;
     }
+    if (!response?.ok) {
+      showToast("Couldn't locate that text in the page.");
+      return;
+    }
+    state.highlightedTarget = source;
   } catch (e) {
-    showToast("Page not reachable (it may have navigated).");
+    if (isCurrentHighlight(source, epoch)) {
+      showToast("Page not reachable (it may have navigated).");
+    }
   }
+}
+
+function scrollToBottom() {
+  els.messages.scrollTop = els.messages.scrollHeight;
 }
 
 // --- Tab lifecycle ----------------------------------------------------------
@@ -401,6 +595,7 @@ function watchTab() {
 
 function invalidate(reason) {
   state.invalidated = true;
+  cancelHighlightAndClear();
   showNotice(reason);
 }
 
@@ -430,20 +625,11 @@ function showToast(text) {
 }
 
 // ============================================================================
-// askLLM — one authenticated round-trip to TokenPath's POST /v1/answer, which
-// generates a grounded answer and attributes it in the same call.
-//
-//   askLLM(context, messages) -> { answer, attributions, creditsRemaining }
-//   attributions: [{ answerStart, answerEnd, sourceStart, sourceEnd, confidence }]
-//     answerStart/answerEnd -> char offsets into `answer`
-//     sourceStart/sourceEnd -> char offsets into `context` (the extraction
-//                              string), which the content script maps to live
-//                              DOM nodes for highlighting.
-//
-// `context` is sent verbatim as `document` — never trimmed or re-normalized —
-// so the source offsets in the response index straight into it.
+// askLLM — grounded generation and fixed-span attribution via POST /v1/answer.
+// The source offsets index the exact (possibly code-point-limited) document
+// sent here, which is always a prefix of the content script's extraction.
 // ============================================================================
-async function askLLM(context, messages) {
+async function askLLM(context, messages, { maxOutputTokens = null } = {}) {
   const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
   const question =
     lastUserIndex === -1
@@ -454,11 +640,20 @@ async function askLLM(context, messages) {
     .slice(0, lastUserIndex === -1 ? messages.length : lastUserIndex)
     .filter((m) => m.content && m.content.trim())
     .slice(-40)
-    .map((m) => ({ role: m.role, content: m.content.slice(0, 10_000) }));
+    .map((m) => ({
+      role: m.role,
+      content: TldrPanelLogic.truncateCodePoints(m.content, 10_000),
+    }));
 
+  const documentText = TldrPanelLogic.truncateCodePoints(
+    context,
+    TokenPath.MAX_DOCUMENT_CHARS
+  );
+  const questionText = TldrPanelLogic.truncateCodePoints(question, 10_000);
   return TokenPath.answer({
-    document: context.slice(0, TokenPath.MAX_DOCUMENT_CHARS),
-    question: question.slice(0, 10_000),
+    document: documentText,
+    question: questionText,
     messages: prior,
+    maxOutputTokens,
   });
 }
