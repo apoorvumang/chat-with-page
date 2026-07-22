@@ -429,6 +429,7 @@ function recordDeterministic(good) {
         null,
         (value) => (captured = value)
       );
+      const nativeSelectionAfterCapture = selection.toString();
 
       let highlighted;
       const start = captured.text.indexOf("text");
@@ -440,6 +441,7 @@ function recordDeterministic(good) {
       const focus = [...(CSS.highlights.get("tldr-attrib") || [])][0];
       return {
         captured,
+        nativeSelectionAfterCapture,
         highlighted,
         focus: focus?.toString() || "",
       };
@@ -447,12 +449,13 @@ function recordDeterministic(good) {
     const good =
       !result.captured?.error &&
       result.captured?.text.includes("Selected") &&
+      result.nativeSelectionAfterCapture === "" &&
       result.highlighted?.ok &&
       result.focus === "text";
     console.log("\n### Flattened selection hint fixture");
     console.log(
-      `  [exact Range beats normalized hint] ${good ? "PASS" : "FAIL"}` +
-        ` — error=${result.captured?.error || "none"}, focus="${result.focus}"`
+      `  [exact Range beats normalized hint + clears native selection] ${good ? "PASS" : "FAIL"}` +
+        ` — selected=${result.nativeSelectionAfterCapture.length}, focus="${result.focus}"`
     );
     recordDeterministic(good);
   } catch (error) {
@@ -499,6 +502,15 @@ function recordDeterministic(good) {
     await setupPage(page);
 
     const result = await page.evaluate(() => {
+      // A collapsed caret is not the stale blue selection the feature is meant
+      // to clear, so late-injection recovery must leave it alone.
+      const selection = window.getSelection();
+      const caret = document.createRange();
+      caret.setStart(document.getElementById("body").firstChild, 0);
+      caret.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(caret);
+
       let captured;
       window.__tldrMsg(
         {
@@ -519,6 +531,7 @@ function recordDeterministic(good) {
       const focus = [...(CSS.highlights.get("tldr-attrib") || [])][0];
       return {
         captured,
+        caretPreserved: selection.rangeCount === 1 && selection.isCollapsed,
         highlighted,
         focus: focus?.toString() || "",
       };
@@ -528,12 +541,13 @@ function recordDeterministic(good) {
       result.captured?.text.includes("Jul 06, 2026") &&
       !result.captured?.text.includes("1,985") &&
       !result.captured?.text.includes("Share") &&
+      result.caretPreserved &&
       result.highlighted?.ok &&
       result.focus === "Article body";
     console.log("\n### Substack late-injection fixture");
     console.log(
       `  [header→body hint remap] ${good ? "PASS" : "FAIL"}` +
-        ` — error=${result.captured?.error || "none"}, focus="${result.focus}"`
+        ` — caret=${result.caretPreserved}, focus="${result.focus}"`
     );
     recordDeterministic(good);
   } catch (error) {

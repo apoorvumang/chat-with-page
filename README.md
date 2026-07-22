@@ -30,7 +30,8 @@ a one-word selection.
 2. The background worker starts an idempotent injection into the exact source
    frame, covering tabs that were open before an extension reload. It opens the
    side panel without awaiting its animation and captures immediately. A missing
-   listener or stale capture response is retried once after injection.
+   listener or stale capture response is retried once after injection. Once the
+   DOM map is safely captured, the native page selection is cleared.
 3. One authenticated `POST /v1/answer` request generates the grounded answer and
    returns server-selected attribution spans. Each span contains character
    bounds in both the answer and the selected source document.

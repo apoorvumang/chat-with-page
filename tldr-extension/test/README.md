@@ -41,7 +41,8 @@ capture → fixed-span click or source-offset highlight. It covers:
 - a Gmail-shaped nested scroll pane whose complete message subtree is replaced
   between capture and highlight, including repeated text and inline elements;
 - exact Range capture when Chrome's flattened selection hint omits an invisible
-  character;
+  character, followed by clearing the native page selection without losing
+  fixed-span highlighting;
 - a Substack-shaped late-injection selection spanning header and body, including
   CSS-uppercase dates, `user-select:none` reaction controls, and a visibly
   rendered `aria-hidden` ancestor;

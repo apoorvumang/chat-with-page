@@ -111,7 +111,11 @@
         extraction = candidate;
         clearHighlight();
         extraction.captureId = msg.captureId || null;
+        // The exact DOM map is now owned by `extraction`; the browser's native
+        // blue selection is no longer needed and makes the page look stuck in
+        // selection mode after the user chooses TLDR.
         sendResponse({ text: extraction.text, error: extraction.error });
+        if (!extraction.error) clearNativeSelection();
         break;
       }
       case "highlight": {
@@ -134,6 +138,18 @@
     // All handlers respond synchronously.
     return false;
   });
+
+  function clearNativeSelection() {
+    try {
+      const selection = window.getSelection();
+      if (selection?.rangeCount && !selection.isCollapsed) {
+        selection.removeAllRanges();
+      }
+    } catch (e) {
+      // Visual cleanup is best-effort and must never turn a valid capture into
+      // a failed one on an unusual document implementation.
+    }
+  }
 
   // --- Extraction -----------------------------------------------------------
 
