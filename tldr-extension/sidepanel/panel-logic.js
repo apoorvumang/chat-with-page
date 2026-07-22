@@ -110,11 +110,34 @@ const TldrPanelLogic = (() => {
     return value.slice(0, codeUnits);
   }
 
+  // TokenPath returns Python-style Unicode code-point offsets, but browser
+  // strings and DOM Range boundaries use UTF-16 code units. Build this once
+  // per API string so every attribution bound can be translated without
+  // searching for its text (which would be ambiguous when a phrase repeats).
+  function codePointToUtf16Map(text) {
+    const map = [0];
+    let utf16Offset = 0;
+    for (const character of String(text || "")) {
+      utf16Offset += character.length;
+      map.push(utf16Offset);
+    }
+    return map;
+  }
+
+  function codePointOffsetToUtf16(map, offset) {
+    if (!Number.isInteger(offset)) return NaN;
+    const index = offset;
+    if (index < 0 || index >= map.length) return NaN;
+    return map[index];
+  }
+
   return {
     SHORT_SELECTION_WORDS,
     buildSummaryRequest,
     enforceShorterSummary,
     truncateCodePoints,
+    codePointToUtf16Map,
+    codePointOffsetToUtf16,
   };
 })();
 

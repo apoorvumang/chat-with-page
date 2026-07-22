@@ -75,12 +75,20 @@ follow-ups. The server response is expected to contain:
 }
 ```
 
-The offset contract is half-open character bounds:
+The offset contract is half-open Unicode code-point bounds (Python string
+indices), not JavaScript UTF-16 code units:
 
 - `answer.start` and `answer.end` index the exact returned `answer` string.
 - `source.start` and `source.end` index the exact submitted `document` string.
 - `source` may be null when the server cannot attribute a claim; the client
   leaves that answer text unclickable.
+
+Immediately after receiving the response, the API adapter converts the answer
+bounds against the returned `answer` and the source bounds against the exact
+submitted `document`. All downstream panel slicing, extraction-map indexing,
+and DOM `Range` boundaries therefore remain JavaScript-native UTF-16 offsets.
+Searching by `source.text` is deliberately avoided because repeated text would
+discard the server's occurrence-level disambiguation.
 
 The client adapts valid spans to:
 

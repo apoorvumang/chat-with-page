@@ -62,13 +62,22 @@ const TokenPath = {
       payload.max_output_tokens = Math.trunc(maxOutputTokens);
     }
     const body = await this._request("POST", "/v1/answer", payload);
+    const answerOffsetMap = TldrPanelLogic.codePointToUtf16Map(body.answer);
+    const sourceOffsetMap = TldrPanelLogic.codePointToUtf16Map(document);
+    const toAnswerOffset = (offset) =>
+      TldrPanelLogic.codePointOffsetToUtf16(answerOffsetMap, offset);
+    const toSourceOffset = (offset) =>
+      TldrPanelLogic.codePointOffsetToUtf16(sourceOffsetMap, offset);
     const attributions = (body.attributions || [])
       .filter((span) => span.source)
       .map((span) => ({
-        answerStart: span.answer.start,
-        answerEnd: span.answer.end,
-        sourceStart: span.source.start,
-        sourceEnd: span.source.end,
+        // The service uses Unicode code points; everything downstream from
+        // this adapter (String#slice, the extraction map, and DOM Range) uses
+        // JavaScript's UTF-16 offsets.
+        answerStart: toAnswerOffset(span.answer.start),
+        answerEnd: toAnswerOffset(span.answer.end),
+        sourceStart: toSourceOffset(span.source.start),
+        sourceEnd: toSourceOffset(span.source.end),
         confidence: span.source.confidence,
       }));
     return {

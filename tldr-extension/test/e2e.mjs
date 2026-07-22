@@ -138,12 +138,14 @@ function recordDeterministic(good) {
 
 // Side-panel regression: a never-resolving credits refresh must not hold the
 // seed behind "Waiting…"; fixed attribution spans route to the original frame.
+// The LinkedIn-shaped emoji also verifies that TokenPath's code-point answer
+// and source offsets become browser-native UTF-16 offsets at the API boundary.
 {
   const page = await browser.newPage();
   try {
     await page.addInitScript(() => {
       const source =
-        "Fable 5 appeared during the first preview with early concept art and an initial cast reveal. " +
+        "Fable 5 appeared during the first preview with early concept art and an initial cast reveal 🎓. " +
         "Later, after several production updates and a new showcase, Fable 5 shipped worldwide to players across every supported market.";
       window.__panelSource = source;
       window.__panelSent = [];
@@ -204,16 +206,27 @@ function recordDeterministic(good) {
         const request = options.body ? JSON.parse(options.body) : null;
         window.__panelRequests.push({ path, request });
         if (path.endsWith("/v1/answer")) {
-          const sourceStart = request.document.lastIndexOf("Fable 5");
+          const answer = "After the launch 🎓, Fable 5 shipped worldwide.";
+          const answerUtf16Start = answer.indexOf("Fable 5");
+          const sourceUtf16Start = request.document.lastIndexOf("Fable 5");
+          const codePointOffset = (text, utf16Offset) =>
+            Array.from(text.slice(0, utf16Offset)).length;
+          const answerStart = codePointOffset(answer, answerUtf16Start);
+          const sourceStart = codePointOffset(request.document, sourceUtf16Start);
           return new Response(
             JSON.stringify({
-              answer: "Fable 5 shipped worldwide.",
+              answer,
               attributions: [
                 {
-                  answer: { start: 0, end: 7 },
+                  answer: {
+                    start: answerStart,
+                    end: answerStart + 7,
+                    text: "Fable 5",
+                  },
                   source: {
                     start: sourceStart,
                     end: sourceStart + 7,
+                    text: "Fable 5",
                     confidence: 0.94,
                   },
                 },
@@ -269,6 +282,7 @@ function recordDeterministic(good) {
       return {
         context: document.getElementById("context-text").textContent,
         hasFixedSpans: !!document.querySelector(".attrib"),
+        attributedText: document.querySelector(".attrib")?.textContent,
         answerRequest,
         sent: window.__panelSent[0],
       };
@@ -280,6 +294,7 @@ function recordDeterministic(good) {
     const expectedFocus = sourceText.lastIndexOf("Fable 5");
     const good =
       panelResult.hasFixedSpans &&
+      panelResult.attributedText === "Fable 5" &&
       panelResult.answerRequest?.request?.max_output_tokens <= 128 &&
       /at most \d+ words/.test(panelResult.answerRequest?.request?.question || "") &&
       sentMessage?.type === "highlight" &&
@@ -290,7 +305,7 @@ function recordDeterministic(good) {
       sentOptions?.frameId === 9;
     console.log("\n### Side-panel selection fixture");
     console.log(
-      `  [nonblocking seed + fixed-span routing] ${good ? "PASS" : "FAIL"}` +
+      `  [nonblocking seed + Unicode-safe fixed-span routing] ${good ? "PASS" : "FAIL"}` +
         ` — frame=${sentOptions?.frameId}, source=${sentMessage?.start}`
     );
     recordDeterministic(good);

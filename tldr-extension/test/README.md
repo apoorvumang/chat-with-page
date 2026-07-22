@@ -17,7 +17,8 @@ This runs three files:
   sub-sentence ranges without sentence expansion.
 - **`panel-logic.test.cjs`** checks the 24-word automatic-summary cutoff,
   adaptive word and token budgets, the deterministic “TL;DR is shorter” guard,
-  code-point-safe truncation around emoji, and whitespace-free CJK handling.
+  code-point-safe truncation around emoji, TokenPath code-point to browser
+  UTF-16 offset conversion, and whitespace-free CJK handling.
 - **`background.test.cjs`** holds `chrome.sidePanel.open()` unresolved and proves
   that capture still proceeds immediately. It also verifies exact-frame warm
   injection, retries for missing receivers and stale “page changed” responses,
@@ -36,8 +37,9 @@ scripts behind a small Chrome API shim, and drives selection → `contextmenu` �
 capture → fixed-span click or source-offset highlight. It covers:
 
 - side-panel bootstrap while `/credits` never resolves, adaptive summary
-  payloads, fixed server-span rendering, stale-seed rejection, and routing a
-  click to the original tab and frame;
+  payloads, fixed server-span rendering, code-point offset conversion across a
+  LinkedIn-shaped emoji, stale-seed rejection, and routing a click to the
+  original tab and frame;
 - a Gmail-shaped nested scroll pane whose complete message subtree is replaced
   between capture and highlight, including repeated text and inline elements;
 - exact Range capture when Chrome's flattened selection hint omits an invisible

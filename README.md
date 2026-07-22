@@ -34,10 +34,11 @@ a one-word selection.
    DOM map is safely captured, the native page selection is cleared.
 3. One authenticated `POST /v1/answer` request generates the grounded answer and
    returns server-selected attribution spans. Each span contains character
-   bounds in both the answer and the selected source document.
+   bounds in both the answer and the selected source document. TokenPath's
+   Unicode code-point bounds are converted once to JavaScript UTF-16 offsets,
+   including across emoji and other astral-plane characters.
 4. The panel renders those answer spans as clickable claims. Clicking one sends
-   its exact `source.start` and `source.end` bounds to the originating tab and
-   frame.
+   its converted source bounds to the originating tab and frame.
 5. The content script maps those document offsets back to live DOM `Range`s,
    highlights the source with the CSS Custom Highlight API, and scrolls it into
    view, including through nested panes such as Gmail's message view.

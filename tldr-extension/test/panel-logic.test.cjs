@@ -45,4 +45,41 @@ assert.strictEqual(Logic.truncateCodePoints("ab🙂cd", 3), "ab🙂");
 assert.strictEqual(Logic.truncateCodePoints("ab🙂cd", 4), "ab🙂c");
 console.log("PASS: document limits never split emoji surrogate pairs");
 
+const linkedInText =
+  'From “You Are Not Good Enough” to “We Are Proud of You” 🎓\n' +
+  "This degree carries the weight of every failure, rejection, and criticism.";
+const criticismStart = linkedInText.indexOf("criticism");
+const criticismEnd = criticismStart + "criticism".length;
+const criticismCodePointStart = Array.from(
+  linkedInText.slice(0, criticismStart)
+).length;
+const criticismCodePointEnd = criticismCodePointStart + "criticism".length;
+const linkedInOffsetMap = Logic.codePointToUtf16Map(linkedInText);
+assert.strictEqual(criticismStart, criticismCodePointStart + 1);
+assert.strictEqual(
+  Logic.codePointOffsetToUtf16(linkedInOffsetMap, criticismCodePointStart),
+  criticismStart
+);
+assert.strictEqual(
+  Logic.codePointOffsetToUtf16(linkedInOffsetMap, criticismCodePointEnd),
+  criticismEnd
+);
+assert.strictEqual(linkedInText.slice(criticismStart, criticismEnd), "criticism");
+
+assert.deepStrictEqual(Logic.codePointToUtf16Map("abc"), [0, 1, 2, 3]);
+const multiEmoji = "A🎓B🚀";
+const multiEmojiMap = Logic.codePointToUtf16Map(multiEmoji);
+assert.deepStrictEqual(multiEmojiMap, [0, 1, 3, 4, 6]);
+assert.strictEqual(
+  multiEmoji.slice(
+    Logic.codePointOffsetToUtf16(multiEmojiMap, 1),
+    Logic.codePointOffsetToUtf16(multiEmojiMap, 4)
+  ),
+  "🎓B🚀"
+);
+assert.ok(Number.isNaN(Logic.codePointOffsetToUtf16(multiEmojiMap, -1)));
+assert.ok(Number.isNaN(Logic.codePointOffsetToUtf16(multiEmojiMap, 5)));
+assert.ok(Number.isNaN(Logic.codePointOffsetToUtf16(multiEmojiMap, 1.5)));
+console.log("PASS: TokenPath code-point offsets convert to exact browser UTF-16 bounds");
+
 console.log("\nAll panel-logic assertions passed.");

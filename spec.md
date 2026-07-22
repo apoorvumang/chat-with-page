@@ -80,8 +80,11 @@ and records every emitted character's raw node offset:
 
 `start` and `end` index the canonical extraction string in JavaScript UTF-16
 code units. The node map never crosses the extension-message boundary. The exact
-canonical string is sent as TokenPath's `document` and is not normalized again,
-so returned source bounds map back to the same characters.
+canonical string is sent as TokenPath's `document` and is not normalized again.
+TokenPath returns Unicode code-point bounds; the API adapter converts both
+answer and source bounds against their exact strings before the panel slices an
+answer or the content script resolves a DOM range. This prevents cumulative
+highlight drift after emoji while preserving repeated-string disambiguation.
 
 ## Summary and generation policy
 
