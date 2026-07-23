@@ -56,11 +56,12 @@ An eagerly extracted DOM `Range` is authoritative. Chrome's flattened
 
 - removes invisible formatting characters and collapses Unicode whitespace;
 - applies length-preserving ASCII case folding for CSS `text-transform`;
-- omits text beneath `user-select:none` controls; and
+- follows the closest decisive `user-select` value, omitting `none` controls
+  while honoring nearer `text` or `all` overrides; and
 - accepts only a unique occurrence.
 
-These rules cover current Substack and X selection shapes without silently
-choosing the wrong duplicate.
+These rules cover current Substack, WhatsApp, and X selection shapes without
+silently choosing the wrong duplicate.
 
 Every seed carries `captureId`, `capturedAt`, `tabId`, `windowId`, and `frameId`.
 IDs are allocated before extraction, so click order—not async completion
@@ -131,16 +132,19 @@ when a phrase such as `Fable 5` appears more than once in the captured document.
 
 ## Mutation and ambiguity policy
 
-Before highlighting, the content script verifies that the route, stable source
-scope, visibility, and mapped characters are still current. This catches both
-detached subtrees and connected Text nodes whose data React changed in place.
+Before highlighting, the content script verifies the route, stable source
+scope, rendered state, and mapped characters for the clicked attribution span.
+Unrelated nodes elsewhere in the captured selection may hydrate or rerender
+without invalidating an unchanged target. A connected target Text node whose
+data React changed in place is still rejected.
 
-If the DOM changed, it first restores the original range beneath a stable Gmail
-message ID, public X tweet ID, logged-in X status permalink, X Article root, or
-unique non-X element ID. If child paths moved, it rebases the **complete captured
-selection** inside that same identified source and then reapplies the server's
-relative source bounds. A stable source is never allowed to fall through to a
-page-wide match, where the same words might belong to another message or post.
+If target nodes were replaced, it first restores the affected entries by exact
+child paths beneath a stable Gmail message ID, WhatsApp serialized message ID,
+public X tweet ID, logged-in X status permalink, X Article root, or uniquely
+headed semantic `article`. If that path recovery cannot prove an exact match,
+the existing complete-selection rebase may run inside the same identified
+source. A stable source is never allowed to fall through to a page-wide match,
+where the same words might belong to another message, post, or article region.
 
 Identity-less captures may use a body-wide fallback only when the complete
 captured text occurs exactly once. Missing or duplicate matches fail visibly;

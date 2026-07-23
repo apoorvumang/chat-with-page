@@ -42,6 +42,14 @@ capture → fixed-span click or source-offset highlight. It covers:
   original tab and frame;
 - a Gmail-shaped nested scroll pane whose complete message subtree is replaced
   between capture and highlight, including repeated text and inline elements;
+- a WhatsApp-shaped selection spanning link-preview text and a later image
+  caption beneath a non-selectable app shell, including metadata exclusion,
+  subtree replacement, unrelated message hydration, exact serialized-message
+  recovery despite duplicate captions, changed-target rejection, and selection
+  cleanup;
+- a dynamic SSR article whose subtree hydrates after capture, including an
+  unrelated lead edit, a duplicate target outside the article, and exact
+  clicked-span recovery beneath the article heading;
 - exact Range capture when Chrome's flattened selection hint omits an invisible
   character, followed by clearing the native page selection without losing
   fixed-span highlighting;
@@ -54,7 +62,8 @@ capture → fixed-span click or source-offset highlight. It covers:
   text, plus rejection of a connected React Text node whose contents changed;
 - a live public X post body, including a React-rendered span replacement; and
 - single-node and multi-block extraction and highlighting on Example,
-  Wikipedia, GNU, MDN, Hacker News, a live Substack post, and a live X profile.
+  Wikipedia, GNU, MDN, Hacker News, the live FLUX 3 article, a live Substack
+  post, and a live X profile.
 
 To run both levels:
 

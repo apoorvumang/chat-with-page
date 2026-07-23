@@ -26,7 +26,8 @@ a one-word selection.
 
 1. Content scripts run from `document_start` in every frame. They snapshot the
    live selection and eagerly extract it on `contextmenu`, before a dynamic page
-   such as Gmail or Substack can replace or normalize its DOM selection.
+   such as Gmail, WhatsApp, or Substack can replace or normalize its DOM
+   selection.
 2. The background worker starts an idempotent injection into the exact source
    frame, covering tabs that were open before an extension reload. It opens the
    side panel without awaiting its animation and captures immediately. A missing
@@ -43,15 +44,20 @@ a one-word selection.
    highlights the source with the CSS Custom Highlight API, and scrolls it into
    view, including through nested panes such as Gmail's message view.
 
-Character bounds disambiguate repeated strings in the original extraction. If
-Gmail or X later replaces the selected subtree, the extension restores the
-selection beneath a stable message, post, status, or article identity and remaps
-the complete captured text within that source. It rejects ambiguous body-wide
-matches rather than jumping to the first copy.
+Character bounds disambiguate repeated strings in the original extraction.
+Before navigating, the extension validates only the clicked attribution's
+source span, so unrelated hydration elsewhere in a long selection cannot break
+an unchanged target. If a dynamic page replaces the target subtree, the
+extension restores it beneath a stable Gmail or WhatsApp message, X post/status
+or article identity, or a uniquely headed semantic article. Exact message IDs
+and DOM paths keep repeated text in other messages or page regions from stealing
+the highlight. Changed targets and ambiguous body-wide matches fail instead of
+jumping to the first copy.
 
 Late-injection recovery also handles invisible formatting characters, Unicode
-whitespace, CSS-uppercase text, and `user-select:none` controls found on pages
-such as Substack and X.
+whitespace, CSS-uppercase text, and effective `user-select` overrides. This
+excludes genuinely unselectable controls on Substack and X while accepting
+WhatsApp message text re-enabled beneath its non-selectable app shell.
 
 Only the extracted selection, questions, and bounded conversation context are
 sent to TokenPath. The DOM node map remains inside the source frame.

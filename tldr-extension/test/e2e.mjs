@@ -26,6 +26,7 @@ const SITES = [
   "https://www.gnu.org/philosophy/free-sw.html",
   "https://developer.mozilla.org/en-US/docs/Web/HTML/Element/p",
   "https://news.ycombinator.com",
+  "https://bfl.ai/blog/flux-3",
   "https://taekim.substack.com/p/taes-new-substack-launches-today",
   "https://x.com/nasa", // expect a login/anti-bot wall — included to show the limit
 ];
@@ -407,6 +408,256 @@ function recordDeterministic(good) {
   } catch (error) {
     console.log(
       `\n### Gmail-like dynamic message fixture\n  FAIL — ${String(error.message).split("\n")[0]}`
+    );
+    recordDeterministic(false);
+  } finally {
+    await page.close();
+  }
+}
+
+// WhatsApp disables selection on its app shell, then explicitly re-enables
+// message text. Capture a link-preview-to-image-caption selection across two
+// bubbles while excluding metadata that remains genuinely unselectable.
+{
+  const page = await browser.newPage();
+  try {
+    const fixture = `
+      <style>
+        #app { user-select: none; }
+        #main { width: 520px; }
+        .message, .preview { display: block; margin: 8px; }
+        .selectable-text { display: block; user-select: text; }
+        .meta { user-select: text; }
+        .controls { user-select: none; }
+      </style>
+      <div id="app">
+        <section id="main">
+          <div class="message" role="row" data-id="true_fixture_message_1">
+            <div class="preview">
+              <span id="preview-domain" class="selectable-text">github.com</span>
+              <span class="selectable-text">https://github.com/everything3d/e3d-openscad-studio</span>
+            </div>
+            <div class="selectable-text">code is https://github.com/everything3d/e3d-openscad-studio push to main to deploy</div>
+            <span class="meta">4:04 PM</span>
+            <button class="controls">Reply</button>
+          </div>
+          <div class="message" role="row" data-id="true_fixture_message_2">
+            <img alt="Community team sign" width="120" height="80">
+            <div id="image-caption" class="selectable-text">Can we make for all of these</div>
+            <span class="meta">7:23 PM</span>
+          </div>
+        </section>
+      </div>
+    `;
+    await page.route("https://web.whatsapp.com/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: fixture })
+    );
+    await page.goto("https://web.whatsapp.com/fixture");
+    await setupPage(page);
+
+    const result = await page.evaluate(() => {
+      const first = document.getElementById("preview-domain").firstChild;
+      const last = document.getElementById("image-caption").firstChild;
+      const range = document.createRange();
+      range.setStart(first, 0);
+      range.setEnd(last, last.data.length);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const selectionText = selection.toString();
+      document.getElementById("main").dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true })
+      );
+
+      let captured;
+      window.__tldrMsg(
+        { type: "capture-selection", selectionText },
+        null,
+        (value) => (captured = value)
+      );
+      const nativeSelectionAfterCapture = selection.toString();
+
+      // WhatsApp can replace its virtualized rows while previews and timestamps
+      // hydrate. Recover the target beneath its exact serialized message id;
+      // another message with the same caption must not steal the attribution.
+      const main = document.getElementById("main");
+      main.replaceWith(main.cloneNode(true));
+      document.getElementById("preview-domain").textContent = "github.example";
+      document.querySelector(".meta").textContent = "4:05 PM";
+      document.getElementById("image-caption").classList.remove("selectable-text");
+      document.getElementById("main").id = "main-next";
+      document.getElementById("main-next").insertAdjacentHTML(
+        "beforeend",
+        '<div role="row" data-id="false_fixture_duplicate"><div class="selectable-text">Can we make for all of these</div></div>'
+      );
+      const target = "Can we make for all of these";
+      const start = captured.text.indexOf(target);
+      let highlighted;
+      window.__tldrMsg(
+        { type: "highlight", start, end: start + target.length },
+        null,
+        (value) => (highlighted = value)
+      );
+      const focus =
+        [...(CSS.highlights.get("tldr-attrib") || [])][0]?.toString() || "";
+      document
+        .getElementById("image-caption")
+        .closest('[role="row"]')
+        .setAttribute("data-id", "false_fixture_reused_for_other_chat");
+      let reusedMessage;
+      window.__tldrMsg(
+        { type: "highlight", start, end: start + target.length },
+        null,
+        (value) => (reusedMessage = value)
+      );
+      document
+        .getElementById("image-caption")
+        .closest('[role="row"]')
+        .setAttribute("data-id", "true_fixture_message_2");
+      document.getElementById("image-caption").textContent = "Changed target";
+      let changedTarget;
+      window.__tldrMsg(
+        { type: "highlight", start, end: start + target.length },
+        null,
+        (value) => (changedTarget = value)
+      );
+      return {
+        captured,
+        nativeSelectionAfterCapture,
+        highlighted,
+        focus,
+        reusedMessage,
+        changedTarget,
+      };
+    });
+
+    const good =
+      !result.captured?.error &&
+      result.captured?.text.includes("github.com") &&
+      result.captured?.text.includes("Can we make for all of these") &&
+      result.captured?.text.includes("4:04 PM") &&
+      !result.captured?.text.includes("Reply") &&
+      !result.captured?.text.includes("7:23 PM") &&
+      result.nativeSelectionAfterCapture === "" &&
+      result.highlighted?.ok &&
+      result.focus === "Can we make for all of these" &&
+      result.reusedMessage?.ok === false &&
+      result.changedTarget?.ok === false;
+    console.log("\n### WhatsApp-style selectable-message fixture");
+    console.log(
+      `  [selectable override + unrelated mutation + highlight] ${good ? "PASS" : "FAIL"}` +
+        ` — error=${result.captured?.error || "none"}, focus="${result.focus}"`
+    );
+    recordDeterministic(good);
+  } catch (error) {
+    console.log(
+      `\n### WhatsApp-style selectable-message fixture\n  FAIL — ${String(error.message).split("\n")[0]}`
+    );
+    recordDeterministic(false);
+  } finally {
+    await page.close();
+  }
+}
+
+// SSR articles can hydrate or update media/lead content while an attributed
+// paragraph later in the same selection remains unchanged. Restore only the
+// clicked span beneath the unique semantic article instead of requiring every
+// selected node to remain byte-identical.
+{
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <main id="site-root">
+        <article>
+          <h1>FLUX 3: Real-World Visual Intelligence</h1>
+          <p id="article-lead">FLUX 3 jointly learns from images, videos, and audio within one unified architecture.</p>
+          <p id="article-target">Early results suggest this is the right path for real-world visual intelligence. Server-rendered footnote.</p>
+        </article>
+        <aside>Early results suggest this is the right path for real-world visual intelligence.</aside>
+      </main>
+    `);
+    await setupPage(page);
+    const result = await page.evaluate(() => {
+      const lead = document.getElementById("article-lead").firstChild;
+      const tail = document.getElementById("article-target").firstChild;
+      const range = document.createRange();
+      range.setStart(lead, 0);
+      range.setEnd(tail, tail.data.length);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const selectionText = selection.toString();
+      document.querySelector("article").dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true })
+      );
+      let captured;
+      window.__tldrMsg(
+        { type: "capture-selection", selectionText },
+        null,
+        (value) => (captured = value)
+      );
+
+      const article = document.querySelector("article");
+      const hydrated = article.cloneNode(true);
+      hydrated.querySelector("#article-lead").textContent =
+        "The lead changed after a client-side media block hydrated.";
+      hydrated.querySelector("#article-target").firstChild.data =
+        "Early results suggest this is the right path for real-world visual intelligence. Hydrated client footnote.";
+      article.replaceWith(hydrated);
+
+      const target =
+        "Early results suggest this is the right path for real-world visual intelligence.";
+      const start = captured.text.indexOf(target);
+      let highlighted;
+      window.__tldrMsg(
+        { type: "highlight", start, end: start + target.length },
+        null,
+        (value) => (highlighted = value)
+      );
+      const focus =
+        [...(CSS.highlights.get("tldr-attrib") || [])][0]?.toString() || "";
+      const duplicate = document.querySelector("article").cloneNode(true);
+      duplicate.id = "duplicate-article";
+      document.querySelector("article").after(duplicate);
+      let duplicateArticle;
+      window.__tldrMsg(
+        { type: "highlight", start, end: start + target.length },
+        null,
+        (value) => (duplicateArticle = value)
+      );
+      duplicate.remove();
+      document.getElementById("article-target").firstChild.data =
+        "Early output suggests this is the right path for real-world visual intelligence. Hydrated client footnote.";
+      let changedTarget;
+      window.__tldrMsg(
+        { type: "highlight", start, end: start + target.length },
+        null,
+        (value) => (changedTarget = value)
+      );
+      return {
+        captured,
+        highlighted,
+        focus,
+        duplicateArticle,
+        changedTarget,
+      };
+    });
+    const good =
+      !result.captured?.error &&
+      result.highlighted?.ok &&
+      result.duplicateArticle?.ok === false &&
+      result.changedTarget?.ok === false &&
+      result.focus ===
+        "Early results suggest this is the right path for real-world visual intelligence.";
+    console.log("\n### Dynamic SSR article fixture");
+    console.log(
+      `  [unrelated hydration + semantic-span restore] ${good ? "PASS" : "FAIL"}` +
+        ` — focus="${result.focus}"`
+    );
+    recordDeterministic(good);
+  } catch (error) {
+    console.log(
+      `\n### Dynamic SSR article fixture\n  FAIL — ${String(error.message).split("\n")[0]}`
     );
     recordDeterministic(false);
   } finally {

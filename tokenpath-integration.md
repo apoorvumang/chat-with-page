@@ -150,14 +150,19 @@ once after injection.
 
 For late-injection fallback, Chrome's flattened selection text is uniquely
 remapped while tolerating invisible formatting characters, Unicode whitespace,
-ASCII case differences caused by `text-transform`, and unselectable controls
-used by Substack and X.
+ASCII case differences caused by `text-transform`, and effective `user-select`
+overrides. In particular, WhatsApp's selectable message text remains readable
+beneath its non-selectable app shell while genuinely unselectable controls stay
+out of the canonical document.
 
 The server's source bounds identify the intended occurrence in the original
-canonical document. If Gmail or X later replaces the selected DOM subtree, the
-content script reconstructs the complete selection beneath its stable message,
-post, status, or article identity before applying those bounds. Ambiguous
-fallback matches fail instead of highlighting an arbitrary duplicate.
+canonical document. Navigation validates only the attributed source span, so
+unrelated hydration elsewhere in the selection does not invalidate an unchanged
+target. If its nodes were replaced, the content script restores exact paths
+beneath stable Gmail or WhatsApp message IDs, X post/status/article identities,
+or a uniquely headed semantic article before using those bounds. Changed target
+text and ambiguous fallback matches fail instead of highlighting an arbitrary
+duplicate.
 
 ## Data and privacy
 

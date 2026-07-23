@@ -7,7 +7,7 @@
   // Guard against same-version double-injection (manifest + on-demand
   // scripting.executeScript). A versioned marker lets a fresh script replace a
   // stale isolated-world listener after an unpacked extension reload.
-  const CONTENT_VERSION = "2026-07-21.3";
+  const CONTENT_VERSION = "2026-07-24.1";
   if (window.__tldrContentLoaded === CONTENT_VERSION) return;
   window.__tldrContentLoaded = CONTENT_VERSION;
 
@@ -27,6 +27,10 @@
   let highlight = null;
 
   // --- Selection snapshot ---------------------------------------------------
+
+  function isActiveInstance() {
+    return window.__tldrContentLoaded === CONTENT_VERSION;
+  }
 
   function liveSelectionRange() {
     const selection = window.getSelection();
@@ -66,12 +70,16 @@
 
   document.addEventListener(
     "selectionchange",
-    () => rememberLiveSelection(false),
+    () => {
+      if (isActiveInstance()) rememberLiveSelection(false);
+    },
     true
   );
   document.addEventListener(
     "contextmenu",
-    () => rememberLiveSelection(true),
+    () => {
+      if (isActiveInstance()) rememberLiveSelection(true);
+    },
     true
   );
 
@@ -83,6 +91,9 @@
   // --- Message handling -----------------------------------------------------
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    // A newer on-demand injection supersedes this instance. Do not race its
+    // response with stale capture/highlight state from an already-open tab.
+    if (!isActiveInstance()) return false;
     switch (msg && msg.type) {
       case "capture-selection": {
         const hint = normalizeForComparison(msg.selectionText || "");
@@ -221,7 +232,13 @@
 
       const start = text.length;
       text += out;
-      map.push({ start, end: text.length, node, rawOffsets });
+      map.push({
+        start,
+        end: text.length,
+        node,
+        rawOffsets,
+        messageAnchor: makeWhatsAppMessageAnchor(node),
+      });
     }
 
     if (!text) {
@@ -231,7 +248,9 @@
         error: "No readable text found in the selection.",
       };
     }
-    return { text, map, error: null, anchor: makeRangeAnchor(range) };
+    const anchor = makeRangeAnchor(range);
+    attachAnchorPaths(map, anchor);
+    return { text, map, error: null, anchor };
   }
 
   // Rebuild a page-wide normalized text map only as a mutation fallback. If
@@ -278,6 +297,7 @@
     const end = first + needle.length;
     const map = sliceMap(rebuilt.map, first, end);
     if (!map.length) return false;
+    attachAnchorPaths(map, extraction.anchor);
     extraction.map = map;
     return true;
   }
@@ -293,6 +313,7 @@
     let selector = null;
     let kind = null;
     let statusId = null;
+    let articleKey = null;
     const ancestors = [];
     for (let el = scope; el; el = el.parentElement) ancestors.push(el);
 
@@ -360,6 +381,25 @@
       }
     }
 
+    // A single semantic article root is a stable scope across SSR hydration
+    // and responsive rerenders even when its internal text nodes are replaced.
+    for (const el of kind ? [] : ancestors) {
+      const heading = el.matches?.("article")
+        ? el.querySelector("h1, h2, h3")
+        : null;
+      const headingKey = normalizeForComparison(heading?.textContent || "");
+      if (
+        headingKey &&
+        document.querySelectorAll("article").length === 1
+      ) {
+        scope = el;
+        selector = "article";
+        kind = "article";
+        articleKey = headingKey;
+        break;
+      }
+    }
+
     for (const el of kind || isXHost() ? [] : ancestors) {
       if (el.id) {
         const candidate = `#${CSS.escape(el.id)}`;
@@ -384,6 +424,7 @@
       selector,
       kind,
       statusId,
+      articleKey,
       routeKey: currentRouteKey(),
       startPath,
       endPath,
@@ -438,6 +479,64 @@
     return node;
   }
 
+  function attachAnchorPaths(map, anchor) {
+    if (!isStableAnchor(anchor)) return;
+    const scope = resolveAnchorScope(anchor);
+    if (!scope) return;
+    for (const entry of map) {
+      entry.anchorPath = nodePath(scope, entry.node);
+    }
+  }
+
+  // WhatsApp serializes each message with a durable true_/false_ data-id
+  // inside a role=row wrapper. A cross-message selection's common ancestor is
+  // the conversation pane, so preserve a path for each mapped text node within
+  // its own message as a narrower recovery identity.
+  function makeWhatsAppMessageAnchor(node) {
+    if (location.hostname !== "web.whatsapp.com") return null;
+    const parent = node?.parentElement;
+    const row = parent?.closest?.('[role="row"]');
+    if (!row) return null;
+
+    let dataId = null;
+    for (let element = parent; element; element = element.parentElement) {
+      const candidateId = element.getAttribute?.("data-id") || "";
+      if (/^(true|false)_/.test(candidateId)) {
+        // Keep walking so a quoted-message identity cannot beat the outer
+        // identity of the current bubble.
+        dataId = candidateId;
+      }
+      if (element === row) break;
+    }
+    if (!dataId) {
+      const candidates = [
+        ...row.querySelectorAll('[data-id^="true_"], [data-id^="false_"]'),
+      ];
+      if (candidates.length !== 1) return null;
+      dataId = candidates[0].getAttribute("data-id");
+    }
+
+    const path = nodePath(row, node);
+    if (!dataId || !path) return null;
+    return { dataId, path };
+  }
+
+  function resolveWhatsAppMessageScope(anchor) {
+    if (!anchor?.dataId || !Array.isArray(anchor.path)) return null;
+    let candidates;
+    try {
+      const selector = `[data-id="${CSS.escape(anchor.dataId)}"]`;
+      candidates = [...document.querySelectorAll(selector)];
+    } catch (e) {
+      return null;
+    }
+    if (candidates.length !== 1) return null;
+    const identity = candidates[0];
+    const row = identity.closest?.('[role="row"]');
+    const scope = row || identity;
+    return isRenderedElement(scope) ? scope : null;
+  }
+
   function resolveAnchorScope(anchor) {
     if (!anchor) return null;
     if (anchor.kind === "x-status" && anchor.statusId) {
@@ -445,6 +544,16 @@
         ...document.querySelectorAll('article[data-testid="tweet"]'),
       ].filter((article) => findOwnXStatusId(article) === anchor.statusId);
       return candidates.find(isRenderedElement) || candidates[0] || null;
+    }
+    if (anchor.kind === "article" && anchor.articleKey) {
+      const candidates = [...document.querySelectorAll("article")].filter(
+        (article) =>
+          normalizeForComparison(
+            article.querySelector("h1, h2, h3")?.textContent || ""
+          ) === anchor.articleKey
+      );
+      const rendered = candidates.filter(isRenderedElement);
+      return rendered.length === 1 ? rendered[0] : null;
     }
     if (!anchor.selector) return null;
     try {
@@ -456,7 +565,14 @@
   }
 
   function isStableAnchor(anchor) {
-    return !!anchor && anchor.kind !== "body";
+    // A generic element id is a useful fast-path scope, not a semantic source
+    // identity. Responsive apps can replace or rename layout roots while the
+    // original mapped text nodes remain valid. Gmail/X identities stay strict.
+    return (
+      !!anchor &&
+      anchor.kind !== "body" &&
+      anchor.kind !== "element-id"
+    );
   }
 
   function restoreRangeAnchor(anchor, scope = resolveAnchorScope(anchor)) {
@@ -495,6 +611,8 @@
         end: overlapEnd - sliceStart,
         node: entry.node,
         rawOffsets: entry.rawOffsets.slice(from, to),
+        messageAnchor: entry.messageAnchor || null,
+        anchorPath: entry.anchorPath || null,
       });
     }
     return map;
@@ -603,7 +721,13 @@
       prevTextNode = node;
       const start = text.length;
       text += out;
-      map.push({ start, end: text.length, node, rawOffsets });
+      map.push({
+        start,
+        end: text.length,
+        node,
+        rawOffsets,
+        messageAnchor: makeWhatsAppMessageAnchor(node),
+      });
     }
     return { text, map };
   }
@@ -647,7 +771,7 @@
     return style;
   }
 
-  function isVisibleTextNode(node, cache) {
+  function isRenderedTextNode(node, cache) {
     let el = node.parentElement;
     if (!el) return false;
     const tag = el.tagName;
@@ -659,13 +783,28 @@
       if (cs.visibility === "hidden" || cs.visibility === "collapse") {
         return false;
       }
-      // Match what a user can actually select. Substack/X place reaction
-      // counters between article regions with user-select:none; including them
-      // makes Chrome's flattened selection hint impossible to map contiguously.
-      if (cs.userSelect === "none") return false;
       el = el.parentElement;
     }
     return true;
+  }
+
+  function isVisibleTextNode(node, cache) {
+    if (!isRenderedTextNode(node, cache)) return false;
+    let el = node.parentElement;
+    let selectable = null;
+    while (el) {
+      const cs = computedStyle(el, cache);
+      // `user-select` can be overridden below a non-selectable app shell.
+      // WhatsApp does exactly that: the shell is `none`, while message text is
+      // explicitly `text`. The closest decisive value controls whether this
+      // node is selectable; distant ancestors must not override it. Continue
+      // walking every ancestor for actual visibility checks.
+      if (selectable === null && cs.userSelect && cs.userSelect !== "auto") {
+        selectable = cs.userSelect !== "none";
+      }
+      el = el.parentElement;
+    }
+    return selectable !== false;
   }
 
   function isRenderedElement(element) {
@@ -736,7 +875,7 @@
 
   function highlightRange(rawStart, rawEnd) {
     if (!extraction || !extraction.map.length) return false;
-    if (!ensureLiveExtractionMap()) return false;
+    if (!ensureLiveExtractionMap(rawStart, rawEnd)) return false;
     const resolved = resolveRange(rawStart, rawEnd);
     if (!resolved) return false;
     clearHighlight();
@@ -745,13 +884,52 @@
     return true;
   }
 
-  function ensureLiveExtractionMap() {
+  function ensureLiveExtractionMap(rawStart, rawEnd) {
     if (!extraction || !extraction.map.length) return false;
-    if (extractionMapIsCurrent()) return true;
-    return refreshDetachedExtraction();
+    if (
+      extraction.anchor?.routeKey &&
+      extraction.anchor.routeKey !== currentRouteKey()
+    ) {
+      return false;
+    }
+    // Only the entries used by this attribution need to remain current.
+    // Dynamic pages can hydrate an unrelated preview, timestamp, or media
+    // block elsewhere in a large selection while the clicked source span is
+    // still byte-for-byte valid.
+    if (extractionSpanIsCurrent(rawStart, rawEnd)) return true;
+    if (
+      restoreAnchoredSpanEntries(rawStart, rawEnd) &&
+      extractionSpanIsCurrent(rawStart, rawEnd)
+    ) {
+      return true;
+    }
+    if (
+      restoreWhatsAppSpanEntries(rawStart, rawEnd) &&
+      extractionSpanIsCurrent(rawStart, rawEnd)
+    ) {
+      return true;
+    }
+    if (!refreshDetachedExtraction()) return false;
+    return extractionSpanIsCurrent(rawStart, rawEnd);
   }
 
-  function extractionMapIsCurrent() {
+  function mappedEntriesForSpan(rawStart, rawEnd) {
+    const { start, end } = clampSpan(extraction.text, rawStart, rawEnd);
+    if (end <= start) return null;
+    const startEntry =
+      findEntry(extraction.map, start) ||
+      firstEntryAtOrAfter(extraction.map, start);
+    const endEntry =
+      findEntry(extraction.map, end - 1) ||
+      lastEntryAtOrBefore(extraction.map, end - 1);
+    if (!startEntry || !endEntry) return null;
+    const first = extraction.map.indexOf(startEntry);
+    const last = extraction.map.indexOf(endEntry);
+    if (first < 0 || last < first) return null;
+    return { start, end, first, last };
+  }
+
+  function extractionSpanIsCurrent(rawStart, rawEnd) {
     if (
       extraction.anchor?.routeKey &&
       extraction.anchor.routeKey !== currentRouteKey()
@@ -760,23 +938,137 @@
     }
     const scope = resolveAnchorScope(extraction.anchor);
     if (isStableAnchor(extraction.anchor) && !scope) return false;
+    const target = mappedEntriesForSpan(rawStart, rawEnd);
+    if (!target) return false;
     const styleCache = new WeakMap();
-    return extraction.map.every((entry) => {
+    for (let index = target.first; index <= target.last; index++) {
       if (
-        !entry.node?.isConnected ||
-        (scope && !scope.contains(entry.node)) ||
-        !isVisibleTextNode(entry.node, styleCache)
+        !mapEntryIsCurrent(
+          extraction.map[index],
+          scope,
+          styleCache,
+          target.start,
+          target.end
+        )
       ) {
         return false;
       }
-      let actual = "";
-      for (const rawOffset of entry.rawOffsets) {
-        const ch = entry.node.data[rawOffset];
-        if (ch == null) return false;
-        actual += isWs(ch) ? " " : ch;
+    }
+    return true;
+  }
+
+  function restoreAnchoredSpanEntries(rawStart, rawEnd) {
+    if (!isStableAnchor(extraction.anchor)) return false;
+    const scope = resolveAnchorScope(extraction.anchor);
+    if (!scope) return false;
+    const target = mappedEntriesForSpan(rawStart, rawEnd);
+    if (!target) return false;
+    const replacements = [];
+    const styleCache = new WeakMap();
+    for (let index = target.first; index <= target.last; index++) {
+      const entry = extraction.map[index];
+      if (!Array.isArray(entry.anchorPath)) return false;
+      const candidate = nodeAtPath(scope, entry.anchorPath);
+      if (
+        candidate?.nodeType !== Node.TEXT_NODE ||
+        !mapEntryMatchesNode(
+          entry,
+          candidate,
+          scope,
+          styleCache,
+          target.start,
+          target.end
+        )
+      ) {
+        return false;
       }
-      return actual === extraction.text.slice(entry.start, entry.end);
-    });
+      replacements.push({ entry, candidate });
+    }
+    for (const { entry, candidate } of replacements) {
+      entry.node = candidate;
+    }
+    return true;
+  }
+
+  function restoreWhatsAppSpanEntries(rawStart, rawEnd) {
+    const target = mappedEntriesForSpan(rawStart, rawEnd);
+    if (!target) return false;
+    const replacements = [];
+    const styleCache = new WeakMap();
+    for (let index = target.first; index <= target.last; index++) {
+      const entry = extraction.map[index];
+      const scope = resolveWhatsAppMessageScope(entry.messageAnchor);
+      if (!scope) return false;
+      const candidate = nodeAtPath(scope, entry.messageAnchor.path);
+      if (
+        candidate?.nodeType !== Node.TEXT_NODE ||
+        !mapEntryMatchesNode(
+          entry,
+          candidate,
+          scope,
+          styleCache,
+          target.start,
+          target.end
+        )
+      ) {
+        return false;
+      }
+      replacements.push({ entry, candidate });
+    }
+    for (const { entry, candidate } of replacements) {
+      entry.node = candidate;
+    }
+    return true;
+  }
+
+  function mapEntryIsCurrent(
+    entry,
+    scope,
+    styleCache,
+    spanStart = entry.start,
+    spanEnd = entry.end
+  ) {
+    return mapEntryMatchesNode(
+      entry,
+      entry.node,
+      scope,
+      styleCache,
+      spanStart,
+      spanEnd
+    );
+  }
+
+  function mapEntryMatchesNode(
+    entry,
+    node,
+    scope,
+    styleCache,
+    spanStart = entry.start,
+    spanEnd = entry.end
+  ) {
+    const messageScope = entry.messageAnchor
+      ? resolveWhatsAppMessageScope(entry.messageAnchor)
+      : null;
+    if (
+      !node?.isConnected ||
+      (scope && !scope.contains(node)) ||
+      (entry.messageAnchor &&
+        (!messageScope || !messageScope.contains(node))) ||
+      !isRenderedTextNode(node, styleCache)
+    ) {
+      return false;
+    }
+    const start = Math.max(entry.start, spanStart);
+    const end = Math.min(entry.end, spanEnd);
+    if (end <= start) return false;
+    let actual = "";
+    for (let index = start; index < end; index++) {
+      const rawOffset = entry.rawOffsets[index - entry.start];
+      const ch = node.data[rawOffset];
+      if (ch == null) return false;
+      actual += isWs(ch) ? " " : ch;
+    }
+    return actual === extraction.text.slice(start, end);
   }
 
   function resolveRange(rawStart, rawEnd) {
