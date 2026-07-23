@@ -626,6 +626,14 @@ function recordDeterministic(good) {
         (value) => (duplicateArticle = value)
       );
       duplicate.remove();
+      location.hash = "/different-source";
+      let routeChanged;
+      window.__tldrMsg(
+        { type: "highlight", start, end: start + target.length },
+        null,
+        (value) => (routeChanged = value)
+      );
+      location.hash = "";
       document.getElementById("article-target").firstChild.data =
         "Early output suggests this is the right path for real-world visual intelligence. Hydrated client footnote.";
       let changedTarget;
@@ -639,6 +647,7 @@ function recordDeterministic(good) {
         highlighted,
         focus,
         duplicateArticle,
+        routeChanged,
         changedTarget,
       };
     });
@@ -646,6 +655,7 @@ function recordDeterministic(good) {
       !result.captured?.error &&
       result.highlighted?.ok &&
       result.duplicateArticle?.ok === false &&
+      result.routeChanged?.ok === false &&
       result.changedTarget?.ok === false &&
       result.focus ===
         "Early results suggest this is the right path for real-world visual intelligence.";
@@ -658,6 +668,554 @@ function recordDeterministic(good) {
   } catch (error) {
     console.log(
       `\n### Dynamic SSR article fixture\n  FAIL — ${String(error.message).split("\n")[0]}`
+    );
+    recordDeterministic(false);
+  } finally {
+    await page.close();
+  }
+}
+
+// A stable semantic scope must be enough to recover exact attribution spans
+// when hydration changes only the text-node topology. The canonical selection
+// keeps its original synthetic newline even when two live blocks later become
+// one inline wrapper.
+{
+  const page = await browser.newPage();
+  try {
+    await page.setContent(
+      '<main><article><h1>Resilient text topology</h1>' +
+        '<p id="topology-target">Text topology stays anchored through split and merge.</p>' +
+        '<p id="separator-a">Block separator</p>' +
+        '<p id="separator-b">changes remain attributable.</p>' +
+        "</article></main>"
+    );
+    await setupPage(page);
+    const result = await page.evaluate(() => {
+      const send = (message) => {
+        let response;
+        window.__tldrMsg(message, null, (value) => (response = value));
+        return response;
+      };
+      const highlightedText = () =>
+        [...(CSS.highlights.get("tldr-attrib") || [])]
+          .map((range) => range.toString())
+          .join("");
+      const topologyTarget =
+        "Text topology stays anchored through split and merge.";
+      const separatorTarget =
+        "Block separator\nchanges remain attributable.";
+      const first = document.getElementById("topology-target").firstChild;
+      const last = document.getElementById("separator-b").firstChild;
+      const range = document.createRange();
+      range.setStart(first, 0);
+      range.setEnd(last, last.data.length);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document
+        .querySelector("article")
+        .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+      const captured = send({
+        type: "capture-selection",
+        selectionText: selection.toString(),
+      });
+
+      const topologyStart = captured.text.indexOf(topologyTarget);
+      const separatorStart = captured.text.indexOf(separatorTarget);
+      const topology = document.getElementById("topology-target");
+      topology.innerHTML =
+        'Text topology stays <span>anchored</span> through <em>split and merge.</em>';
+      const split = send({
+        type: "highlight",
+        start: topologyStart,
+        end: topologyStart + topologyTarget.length,
+      });
+      const splitFocus = highlightedText();
+
+      topology.textContent = topologyTarget;
+      const merged = send({
+        type: "highlight",
+        start: topologyStart,
+        end: topologyStart + topologyTarget.length,
+      });
+      const mergedFocus = highlightedText();
+
+      const article = document.querySelector("article");
+      const rerendered = article.cloneNode(true);
+      rerendered.querySelector("#topology-target").textContent =
+        "Unrelated content changed during hydration.";
+      article.replaceWith(rerendered);
+      const blockWhitespace = send({
+        type: "highlight",
+        start: separatorStart,
+        end: separatorStart + separatorTarget.length,
+      });
+      const blockWhitespaceFocus = highlightedText();
+      document.getElementById("topology-target").textContent = topologyTarget;
+
+      const separatorA = document.getElementById("separator-a");
+      const combined = document.createElement("div");
+      combined.id = "separator-combined";
+      combined.innerHTML =
+        "<span>Block separator </span><strong>changes remain attributable.</strong>";
+      separatorA.replaceWith(combined);
+      document.getElementById("separator-b").remove();
+      const wrapperChanged = send({
+        type: "highlight",
+        start: separatorStart,
+        end: separatorStart + separatorTarget.length,
+      });
+      const wrapperFocus = highlightedText();
+
+      return {
+        captured,
+        topologyStart,
+        separatorStart,
+        split,
+        splitFocus,
+        merged,
+        mergedFocus,
+        blockWhitespace,
+        blockWhitespaceFocus,
+        wrapperChanged,
+        wrapperFocus,
+      };
+    });
+    const good =
+      !result.captured?.error &&
+      result.topologyStart >= 0 &&
+      result.separatorStart >= 0 &&
+      result.split?.ok &&
+      result.splitFocus ===
+        "Text topology stays anchored through split and merge." &&
+      result.merged?.ok &&
+      result.mergedFocus ===
+        "Text topology stays anchored through split and merge." &&
+      result.blockWhitespace?.ok &&
+      result.blockWhitespaceFocus.replace(/\s+/g, "") ===
+        "Blockseparatorchangesremainattributable." &&
+      result.wrapperChanged?.ok &&
+      norm(result.wrapperFocus) ===
+        norm("Block separator changes remain attributable.");
+    console.log("\n### Resilient text-topology fixture");
+    console.log(
+      `  [split + merge + block-wrapper recovery] ${good ? "PASS" : "FAIL"}` +
+        ` — split="${result.splitFocus}", merged="${result.mergedFocus}", block="${result.blockWhitespaceFocus}", wrapper="${result.wrapperFocus}"`
+    );
+    recordDeterministic(good);
+  } catch (error) {
+    console.log(
+      `\n### Resilient text-topology fixture\n  FAIL — ${String(error.message).split("\n")[0]}`
+    );
+    recordDeterministic(false);
+  } finally {
+    await page.close();
+  }
+}
+
+// An occurrence ordinal is only a capture-time hint: when repeated text moves
+// within one semantic article, its quote context must follow the intended
+// paragraph. If two live candidates have identical quote context, fail closed.
+{
+  const page = await browser.newPage();
+  try {
+    await page.setContent(
+      '<main><article><h1>Repeated attribution context</h1>' +
+        '<p data-case="alpha">Alpha lead — <span data-target>the shared citation belongs here</span> — alpha tail.</p>' +
+        '<p data-case="beta">Beta lead — <span data-target>the shared citation belongs here</span> — beta tail.</p>' +
+        "</article></main>"
+    );
+    await setupPage(page);
+    const result = await page.evaluate(() => {
+      const send = (message) => {
+        let response;
+        window.__tldrMsg(message, null, (value) => (response = value));
+        return response;
+      };
+      const article = document.querySelector("article");
+      const source = article.querySelector(
+        '[data-case="beta"] [data-target]'
+      ).firstChild;
+      const range = document.createRange();
+      range.selectNodeContents(source);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      article.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+      const captured = send({
+        type: "capture-selection",
+        selectionText: selection.toString(),
+      });
+      const target = "the shared citation belongs here";
+      const start = captured.text.lastIndexOf(target);
+
+      article.innerHTML =
+        '<h1>Repeated attribution context</h1>' +
+        '<p data-case="beta">Beta lead — <span data-target>the shared citation belongs here</span> — beta tail.</p>' +
+        '<p data-case="alpha">Alpha lead — <span data-target>the shared citation belongs here</span> — alpha tail.</p>';
+      const reordered = send({
+        type: "highlight",
+        start,
+        end: start + target.length,
+      });
+      const reorderedRange = [
+        ...(CSS.highlights.get("tldr-attrib") || []),
+      ][0];
+      const reorderedCase =
+        reorderedRange?.startContainer?.parentElement
+          ?.closest("[data-case]")
+          ?.getAttribute("data-case") || "";
+      const reorderedFocus = reorderedRange?.toString() || "";
+
+      send({ type: "clear-highlight" });
+      article.innerHTML =
+        '<h1>Repeated attribution context</h1>' +
+        '<p data-case="ambiguous-one">Beta lead — <span data-target>the shared citation belongs here</span> — beta tail.</p>' +
+        '<p data-case="ambiguous-two">Beta lead — <span data-target>the shared citation belongs here</span> — beta tail.</p>' +
+        '<p data-case="alpha">Alpha lead — <span data-target>the shared citation belongs here</span> — alpha tail.</p>';
+      const ambiguous = send({
+        type: "highlight",
+        start,
+        end: start + target.length,
+      });
+      const ambiguousRanges = [
+        ...(CSS.highlights.get("tldr-attrib") || []),
+      ].length;
+
+      return {
+        captured,
+        start,
+        reordered,
+        reorderedCase,
+        reorderedFocus,
+        ambiguous,
+        ambiguousRanges,
+      };
+    });
+    const good =
+      !result.captured?.error &&
+      result.start >= 0 &&
+      result.reordered?.ok &&
+      result.reorderedCase === "beta" &&
+      result.reorderedFocus === "the shared citation belongs here" &&
+      result.ambiguous?.ok === false &&
+      result.ambiguousRanges === 0;
+    console.log("\n### Repeated in-scope attribution fixture");
+    console.log(
+      `  [context-preserving reorder + ambiguity rejection] ${good ? "PASS" : "FAIL"}` +
+        ` — case=${result.reorderedCase}, ambiguousOk=${result.ambiguous?.ok}`
+    );
+    recordDeterministic(good);
+  } catch (error) {
+    console.log(
+      `\n### Repeated in-scope attribution fixture\n  FAIL — ${String(error.message).split("\n")[0]}`
+    );
+    recordDeterministic(false);
+  } finally {
+    await page.close();
+  }
+}
+
+// A generic element ID is only a scope hint. If hydration duplicates that ID,
+// resolve against the page and require quote context instead of trusting the
+// first invalid-ID match.
+{
+  const page = await browser.newPage();
+  try {
+    await page.setContent(
+      '<main><div id="generic-source" data-case="original">' +
+        "<span>Original lead — </span><b>shared generic quote</b><span> — original tail.</span>" +
+        "</div></main>"
+    );
+    await setupPage(page);
+    const result = await page.evaluate(() => {
+      const send = (message) => {
+        let response;
+        window.__tldrMsg(message, null, (value) => (response = value));
+        return response;
+      };
+      const source = document.querySelector("#generic-source b").firstChild;
+      const range = document.createRange();
+      range.selectNodeContents(source);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      source.parentElement.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true })
+      );
+      const captured = send({
+        type: "capture-selection",
+        selectionText: selection.toString(),
+      });
+
+      document.getElementById("generic-source").outerHTML =
+        '<div id="generic-source" data-case="wrong"><span>Wrong lead — </span><b>shared generic quote</b><span> — wrong tail.</span></div>' +
+        '<div id="generic-source" data-case="right"><span>Original lead — </span><b>shared generic quote</b><span> — original tail.</span></div>';
+      const response = send({
+        type: "highlight",
+        start: 0,
+        end: captured.text.length,
+      });
+      const highlighted = [
+        ...(CSS.highlights.get("tldr-attrib") || []),
+      ][0];
+      return {
+        captured,
+        response,
+        focus: highlighted?.toString() || "",
+        sourceCase:
+          highlighted?.startContainer?.parentElement
+            ?.closest("[data-case]")
+            ?.getAttribute("data-case") || "",
+      };
+    });
+    const good =
+      result.captured?.text === "shared generic quote" &&
+      result.response?.ok &&
+      result.focus === "shared generic quote" &&
+      result.sourceCase === "right";
+    console.log("\n### Duplicate generic-ID scope fixture");
+    console.log(
+      `  [ID hint + body context fallback] ${good ? "PASS" : "FAIL"}` +
+        ` — case=${result.sourceCase}, focus="${result.focus}"`
+    );
+    recordDeterministic(good);
+  } catch (error) {
+    console.log(
+      `\n### Duplicate generic-ID scope fixture\n  FAIL — ${String(error.message).split("\n")[0]}`
+    );
+    recordDeterministic(false);
+  } finally {
+    await page.close();
+  }
+}
+
+// If the originally attributed occurrence changes, an exact duplicate that
+// already existed elsewhere in the same semantic scope must not steal the
+// citation. Context and occurrence metadata can disambiguate a rerender, but
+// cannot turn changed source content into a different source occurrence.
+{
+  const page = await browser.newPage();
+  try {
+    await page.setContent(
+      '<main><article><h1>Changed target with surviving duplicate</h1>' +
+        '<p data-case="survivor">Alpha lead — the shared citation belongs here — alpha tail.</p>' +
+        '<p data-case="original">Beta lead — the shared citation belongs here — beta tail.</p>' +
+        "</article></main>"
+    );
+    await setupPage(page);
+    const result = await page.evaluate(() => {
+      const send = (message) => {
+        let response;
+        window.__tldrMsg(message, null, (value) => (response = value));
+        return response;
+      };
+      const article = document.querySelector("article");
+      const first = article.querySelector('[data-case="survivor"]').firstChild;
+      const original = article.querySelector('[data-case="original"]').firstChild;
+      const range = document.createRange();
+      range.setStart(first, 0);
+      range.setEnd(original, original.data.length);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      article.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+      const captured = send({
+        type: "capture-selection",
+        selectionText: selection.toString(),
+      });
+      const target = "the shared citation belongs here";
+      const start = captured.text.lastIndexOf(target);
+
+      original.data =
+        "Beta lead — the changed citation belongs here — beta tail.";
+      send({ type: "clear-highlight" });
+      const response = send({
+        type: "highlight",
+        start,
+        end: start + target.length,
+      });
+      const highlighted = [
+        ...(CSS.highlights.get("tldr-attrib") || []),
+      ];
+      return {
+        captured,
+        start,
+        response,
+        ranges: highlighted.length,
+        highlightedCase:
+          highlighted[0]?.startContainer?.parentElement
+            ?.closest("[data-case]")
+            ?.getAttribute("data-case") || "",
+      };
+    });
+    const good =
+      !result.captured?.error &&
+      result.start >= 0 &&
+      result.response?.ok === false &&
+      result.ranges === 0 &&
+      result.highlightedCase === "";
+    console.log("\n### Changed target with surviving duplicate fixture");
+    console.log(
+      `  [no fallback jump to unchanged duplicate] ${good ? "PASS" : "FAIL"}` +
+        ` — ok=${result.response?.ok}, ranges=${result.ranges}, case=${result.highlightedCase || "none"}`
+    );
+    recordDeterministic(good);
+  } catch (error) {
+    console.log(
+      `\n### Changed target with surviving duplicate fixture\n  FAIL — ${String(error.message).split("\n")[0]}`
+    );
+    recordDeterministic(false);
+  } finally {
+    await page.close();
+  }
+}
+
+// Quote recovery is case- and code-unit-exact. ZWJ/ZWNJ participate in emoji
+// and Indic shaping, so removing one must be treated as a target mutation
+// rather than as ignorable formatting.
+{
+  const page = await browser.newPage();
+  try {
+    await page.setContent(
+      '<article><h1>Joiner exactness</h1>' +
+        '<p id="joiner-target">Family 👩‍💻 remains joined.</p></article>'
+    );
+    await setupPage(page);
+    const result = await page.evaluate(() => {
+      const send = (message) => {
+        let response;
+        window.__tldrMsg(message, null, (value) => (response = value));
+        return response;
+      };
+      const source = document.getElementById("joiner-target").firstChild;
+      const range = document.createRange();
+      range.selectNodeContents(source);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      source.parentElement.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true })
+      );
+      const captured = send({
+        type: "capture-selection",
+        selectionText: selection.toString(),
+      });
+
+      source.data = "Family 👩💻 remains joined.";
+      send({ type: "clear-highlight" });
+      const response = send({
+        type: "highlight",
+        start: 0,
+        end: captured.text.length,
+      });
+      return {
+        captured,
+        response,
+        ranges: [...(CSS.highlights.get("tldr-attrib") || [])].length,
+      };
+    });
+    const good =
+      result.captured?.text === "Family 👩‍💻 remains joined." &&
+      result.response?.ok === false &&
+      result.ranges === 0;
+    console.log("\n### Joiner-exact quote fixture");
+    console.log(
+      `  [ZWJ mutation rejection] ${good ? "PASS" : "FAIL"}` +
+        ` — ok=${result.response?.ok}, ranges=${result.ranges}`
+    );
+    recordDeterministic(good);
+  } catch (error) {
+    console.log(
+      `\n### Joiner-exact quote fixture\n  FAIL — ${String(error.message).split("\n")[0]}`
+    );
+    recordDeterministic(false);
+  } finally {
+    await page.close();
+  }
+}
+
+// A React update can reuse the same connected Text node and alter content
+// outside the clicked attribution. Validate only the target characters, while
+// continuing to reject any mutation inside the target itself.
+{
+  const page = await browser.newPage();
+  try {
+    await page.setContent(
+      '<article><h1>Span-local mutation safety</h1>' +
+        '<p id="span-local">Stable clicked phrase remains exact. Server-rendered suffix.</p>' +
+        "</article>"
+    );
+    await setupPage(page);
+    const result = await page.evaluate(() => {
+      const send = (message) => {
+        let response;
+        window.__tldrMsg(message, null, (value) => (response = value));
+        return response;
+      };
+      const source = document.getElementById("span-local").firstChild;
+      const range = document.createRange();
+      range.selectNodeContents(source);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      source.parentElement.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true })
+      );
+      const captured = send({
+        type: "capture-selection",
+        selectionText: selection.toString(),
+      });
+      const target = "Stable clicked phrase remains exact.";
+      const start = captured.text.indexOf(target);
+
+      source.data =
+        "Stable clicked phrase remains exact. Hydrated client suffix.";
+      const suffixChanged = send({
+        type: "highlight",
+        start,
+        end: start + target.length,
+      });
+      const suffixFocus =
+        [...(CSS.highlights.get("tldr-attrib") || [])][0]?.toString() || "";
+
+      send({ type: "clear-highlight" });
+      source.data =
+        "Altered clicked phrase remains exact. Hydrated client suffix.";
+      const targetChanged = send({
+        type: "highlight",
+        start,
+        end: start + target.length,
+      });
+      const targetChangedRanges = [
+        ...(CSS.highlights.get("tldr-attrib") || []),
+      ].length;
+
+      return {
+        captured,
+        start,
+        suffixChanged,
+        suffixFocus,
+        targetChanged,
+        targetChangedRanges,
+      };
+    });
+    const good =
+      !result.captured?.error &&
+      result.start >= 0 &&
+      result.suffixChanged?.ok &&
+      result.suffixFocus === "Stable clicked phrase remains exact." &&
+      result.targetChanged?.ok === false &&
+      result.targetChangedRanges === 0;
+    console.log("\n### Span-local same-node mutation fixture");
+    console.log(
+      `  [unrelated suffix accepted + target mutation rejected] ${good ? "PASS" : "FAIL"}` +
+        ` — focus="${result.suffixFocus}", changedOk=${result.targetChanged?.ok}`
+    );
+    recordDeterministic(good);
+  } catch (error) {
+    console.log(
+      `\n### Span-local same-node mutation fixture\n  FAIL — ${String(error.message).split("\n")[0]}`
     );
     recordDeterministic(false);
   } finally {

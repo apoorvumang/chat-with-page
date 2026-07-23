@@ -50,6 +50,18 @@ capture → fixed-span click or source-offset highlight. It covers:
 - a dynamic SSR article whose subtree hydrates after capture, including an
   unrelated lead edit, a duplicate target outside the article, and exact
   clicked-span recovery beneath the article heading;
+- generalized semantic-scope recovery across split and merged text nodes,
+  inserted or removed wrappers that change synthetic block separators,
+  DOM Ranges that omit those generated separators, and same-node edits outside
+  the clicked span;
+- repeated target text reordered within one article, including quote-context
+  disambiguation from context outside a whole-node selection, rejection of
+  indistinguishable candidates, rejection of mutations inside the actual
+  target (including ZWJ removal), and no fallback jump to a surviving duplicate
+  when the originally attributed occurrence changes;
+- duplicated generic element IDs falling back to page-level contextual
+  disambiguation instead of trusting the first invalid-ID match;
+- rejection after query/hash route identity changes;
 - exact Range capture when Chrome's flattened selection hint omits an invisible
   character, followed by clearing the native page selection without losing
   fixed-span highlighting;

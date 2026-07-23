@@ -47,12 +47,15 @@ a one-word selection.
 Character bounds disambiguate repeated strings in the original extraction.
 Before navigating, the extension validates only the clicked attribution's
 source span, so unrelated hydration elsewhere in a long selection cannot break
-an unchanged target. If a dynamic page replaces the target subtree, the
-extension restores it beneath a stable Gmail or WhatsApp message, X post/status
-or article identity, or a uniquely headed semantic article. Exact message IDs
-and DOM paths keep repeated text in other messages or page regions from stealing
-the highlight. Changed targets and ambiguous body-wide matches fail instead of
-jumping to the first copy.
+an unchanged target. If a dynamic page replaces the target subtree, a shared
+resolver searches only beneath the original Gmail or WhatsApp message, X
+post/status/article identity, uniquely headed semantic article, or conservative
+generic scope. Its case-sensitive quote projection tolerates text-node
+split/merge and block-wrapper whitespace changes; bounded prefix/suffix context
+disambiguates reordered repeats. Exact source identities and validated paths
+keep other messages or surviving duplicates from stealing the highlight.
+Changed routes, changed targets, and ambiguous matches fail instead of jumping
+to the first copy.
 
 Late-injection recovery also handles invisible formatting characters, Unicode
 whitespace, CSS-uppercase text, and effective `user-select` overrides. This

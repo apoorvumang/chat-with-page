@@ -7,11 +7,15 @@
   // Guard against same-version double-injection (manifest + on-demand
   // scripting.executeScript). A versioned marker lets a fresh script replace a
   // stale isolated-world listener after an unpacked extension reload.
-  const CONTENT_VERSION = "2026-07-24.1";
+  const CONTENT_VERSION = "2026-07-24.2";
   if (window.__tldrContentLoaded === CONTENT_VERSION) return;
   window.__tldrContentLoaded = CONTENT_VERSION;
 
   const HL_NAME = "tldr-attrib";
+  const QUOTE_CONTEXT_LENGTH = 48;
+  const MAX_QUOTE_MATCHES = 256;
+  const MAX_QUOTE_SOURCE_LENGTH = 500_000;
+  const MAX_CAPTURE_CONTEXT_SOURCE_LENGTH = 100_000;
 
   // The live Range snapshotted at contextmenu time (before the menu click can
   // collapse the visible selection).
@@ -250,6 +254,7 @@
     }
     const anchor = makeRangeAnchor(range);
     attachAnchorPaths(map, anchor);
+    attachScopeQuoteContexts(map, anchor);
     return { text, map, error: null, anchor };
   }
 
@@ -267,19 +272,9 @@
     }
 
     const scope = resolveAnchorScope(extraction.anchor);
-    const anchoredRange = restoreRangeAnchor(extraction.anchor, scope);
-    if (anchoredRange) {
-      const fresh = extractFromRange(anchoredRange);
-      if (!fresh.error && fresh.text === extraction.text) {
-        extraction.map = fresh.map;
-        extraction.anchor = fresh.anchor;
-        return true;
-      }
-    }
-
-    // Child indexes are a fast path, not the identity. Gmail and X routinely
-    // insert wrappers/blocks beneath an otherwise stable message, post, or
-    // article root, so remap the complete captured text inside that root.
+    // Rebase only when the complete captured selection is unique inside the
+    // source. A saved child path cannot safely choose between repeated quotes
+    // after a reorder.
     if (scope && rebaseExtractionWithin(scope)) return true;
 
     // If a stable source identity was captured, never fall through to a body
@@ -298,6 +293,7 @@
     const map = sliceMap(rebuilt.map, first, end);
     if (!map.length) return false;
     attachAnchorPaths(map, extraction.anchor);
+    attachScopeQuoteContexts(map, extraction.anchor);
     extraction.map = map;
     return true;
   }
@@ -438,7 +434,19 @@
   }
 
   function currentRouteKey() {
-    return location.origin + location.pathname;
+    // Ordinary fragments are scroll positions, not source identity. Preserve
+    // hashes only for Gmail and conventional hash-routed SPAs.
+    const routeHash =
+      location.hostname === "mail.google.com" ||
+      /^#(?:!|\/)/.test(location.hash)
+        ? location.hash
+        : "";
+    return (
+      location.origin +
+      location.pathname +
+      location.search +
+      routeHash
+    );
   }
 
   function findOwnXStatusId(article) {
@@ -486,6 +494,149 @@
     for (const entry of map) {
       entry.anchorPath = nodePath(scope, entry.node);
     }
+  }
+
+  // Capture bounded quote context outside each selected Text-node slice. This
+  // is still fast and private to the content frame, but gives a later lazy
+  // resolver evidence when an attribution consumes a whole node or selection.
+  function attachScopeQuoteContexts(map, anchor) {
+    const fallbackScope = resolveAnchorScope(anchor) || document.body;
+    const groups = new Map();
+    for (const entry of map) {
+      const scope = entry.messageAnchor
+        ? resolveWhatsAppMessageScope(entry.messageAnchor)
+        : fallbackScope;
+      if (!scope) continue;
+      let entries = groups.get(scope);
+      if (!entries) {
+        entries = [];
+        groups.set(scope, entries);
+      }
+      entries.push(entry);
+    }
+
+    for (const [scope, entries] of groups) {
+      attachQuoteContextsFromRoot(
+        entries,
+        scope,
+        "scopePrefix",
+        "scopeSuffix"
+      );
+    }
+
+    // A nearest-block context follows a paragraph when it is reordered, while
+    // the broader semantic-scope context helps when wrappers disappear.
+    const blockGroups = new Map();
+    const styleCache = new WeakMap();
+    for (const entry of map) {
+      const block = nearestBlock(entry.node, styleCache);
+      if (!block) continue;
+      let entries = blockGroups.get(block);
+      if (!entries) {
+        entries = [];
+        blockGroups.set(block, entries);
+      }
+      entries.push(entry);
+    }
+    for (const [block, entries] of blockGroups) {
+      attachQuoteContextsFromRoot(
+        entries,
+        block,
+        "blockPrefix",
+        "blockSuffix"
+      );
+    }
+  }
+
+  function attachQuoteContextsFromRoot(
+    entries,
+    root,
+    prefixKey,
+    suffixKey
+  ) {
+    const rebuilt = extractFromRoot(
+      root,
+      true,
+      MAX_CAPTURE_CONTEXT_SOURCE_LENGTH
+    );
+    if (rebuilt.overflow) return;
+    const projection = buildQuoteProjection(rebuilt.text, rebuilt.map);
+    const byNode = new WeakMap();
+    for (const freshEntry of rebuilt.map) {
+      byNode.set(freshEntry.node, freshEntry);
+    }
+
+    for (const entry of entries) {
+      const freshEntry = byNode.get(entry.node);
+      if (!freshEntry || !entry.rawOffsets.length) continue;
+      const firstRawOffset = entry.rawOffsets[0];
+      const lastRawOffset = entry.rawOffsets[entry.rawOffsets.length - 1];
+      const first = canonicalOffsetForRaw(
+        freshEntry,
+        firstRawOffset,
+        false
+      );
+      const last = canonicalOffsetForRaw(
+        freshEntry,
+        lastRawOffset,
+        true
+      );
+      if (!Number.isFinite(first) || !Number.isFinite(last)) continue;
+
+      const projectedStart = lowerBound(
+        projection.canonicalOffsets,
+        first
+      );
+      const projectedEnd = upperBound(
+        projection.canonicalOffsets,
+        last
+      );
+      entry[prefixKey] = projection.text.slice(
+        Math.max(0, projectedStart - QUOTE_CONTEXT_LENGTH),
+        projectedStart
+      );
+      entry[suffixKey] = projection.text.slice(
+        projectedEnd,
+        projectedEnd + QUOTE_CONTEXT_LENGTH
+      );
+    }
+  }
+
+  function canonicalOffsetForRaw(entry, rawOffset, preferBefore) {
+    let candidate = -1;
+    for (let index = 0; index < entry.rawOffsets.length; index++) {
+      const current = entry.rawOffsets[index];
+      if (current === rawOffset) return entry.start + index;
+      if (preferBefore) {
+        if (current > rawOffset) break;
+        candidate = index;
+      } else if (current >= rawOffset) {
+        return entry.start + index;
+      }
+    }
+    return candidate >= 0 ? entry.start + candidate : null;
+  }
+
+  function lowerBound(values, target) {
+    let low = 0;
+    let high = values.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (values[middle] < target) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  function upperBound(values, target) {
+    let low = 0;
+    let high = values.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (values[middle] <= target) low = middle + 1;
+      else high = middle;
+    }
+    return low;
   }
 
   // WhatsApp serializes each message with a durable true_/false_ data-id
@@ -543,7 +694,8 @@
       const candidates = [
         ...document.querySelectorAll('article[data-testid="tweet"]'),
       ].filter((article) => findOwnXStatusId(article) === anchor.statusId);
-      return candidates.find(isRenderedElement) || candidates[0] || null;
+      const rendered = candidates.filter(isRenderedElement);
+      return rendered.length === 1 ? rendered[0] : null;
     }
     if (anchor.kind === "article" && anchor.articleKey) {
       const candidates = [...document.querySelectorAll("article")].filter(
@@ -558,7 +710,14 @@
     if (!anchor.selector) return null;
     try {
       const candidates = [...document.querySelectorAll(anchor.selector)];
-      return candidates.find(isRenderedElement) || candidates[0] || null;
+      const rendered = candidates.filter(isRenderedElement);
+      if (isStableAnchor(anchor)) {
+        return rendered.length === 1 ? rendered[0] : null;
+      }
+      if (anchor.kind === "element-id") {
+        return rendered.length === 1 ? rendered[0] : null;
+      }
+      return rendered[0] || candidates[0] || null;
     } catch (e) {
       return null;
     }
@@ -573,28 +732,6 @@
       anchor.kind !== "body" &&
       anchor.kind !== "element-id"
     );
-  }
-
-  function restoreRangeAnchor(anchor, scope = resolveAnchorScope(anchor)) {
-    if (
-      !anchor ||
-      !Array.isArray(anchor.startPath) ||
-      !Array.isArray(anchor.endPath)
-    ) {
-      return null;
-    }
-    if (!scope) return null;
-    const start = nodeAtPath(scope, anchor.startPath);
-    const end = nodeAtPath(scope, anchor.endPath);
-    if (!start || !end) return null;
-    try {
-      const range = document.createRange();
-      range.setStart(start, anchor.startOffset);
-      range.setEnd(end, anchor.endOffset);
-      return range;
-    } catch (e) {
-      return null;
-    }
   }
 
   function sliceMap(sourceMap, sliceStart, sliceEnd) {
@@ -613,6 +750,10 @@
         rawOffsets: entry.rawOffsets.slice(from, to),
         messageAnchor: entry.messageAnchor || null,
         anchorPath: entry.anchorPath || null,
+        scopePrefix: entry.scopePrefix || "",
+        scopeSuffix: entry.scopeSuffix || "",
+        blockPrefix: entry.blockPrefix || "",
+        blockSuffix: entry.blockSuffix || "",
       });
     }
     return map;
@@ -693,11 +834,18 @@
     return ch >= "A" && ch <= "Z" ? ch.toLowerCase() : ch;
   }
 
-  function extractFromRoot(root) {
+  function extractFromRoot(
+    root,
+    renderedOnly = false,
+    maxCharacters = Infinity
+  ) {
     const styleCache = new WeakMap();
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
-        return isVisibleTextNode(node, styleCache)
+        const accepted = renderedOnly
+          ? isRenderedTextNode(node, styleCache)
+          : isVisibleTextNode(node, styleCache);
+        return accepted
           ? NodeFilter.FILTER_ACCEPT
           : NodeFilter.FILTER_REJECT;
       },
@@ -721,6 +869,9 @@
       prevTextNode = node;
       const start = text.length;
       text += out;
+      if (text.length > maxCharacters) {
+        return { text: "", map: [], overflow: true };
+      }
       map.push({
         start,
         end: text.length,
@@ -729,7 +880,7 @@
         messageAnchor: makeWhatsAppMessageAnchor(node),
       });
     }
-    return { text, map };
+    return { text, map, overflow: false };
   }
 
   // Collapse each run of whitespace to a single space, recording the source
@@ -875,8 +1026,7 @@
 
   function highlightRange(rawStart, rawEnd) {
     if (!extraction || !extraction.map.length) return false;
-    if (!ensureLiveExtractionMap(rawStart, rawEnd)) return false;
-    const resolved = resolveRange(rawStart, rawEnd);
+    const resolved = resolveLiveAttributionRange(rawStart, rawEnd);
     if (!resolved) return false;
     clearHighlight();
     applyHighlight(resolved.range);
@@ -884,33 +1034,34 @@
     return true;
   }
 
-  function ensureLiveExtractionMap(rawStart, rawEnd) {
-    if (!extraction || !extraction.map.length) return false;
+  function resolveLiveAttributionRange(rawStart, rawEnd) {
+    if (!extraction || !extraction.map.length) return null;
     if (
       extraction.anchor?.routeKey &&
       extraction.anchor.routeKey !== currentRouteKey()
     ) {
-      return false;
+      return null;
     }
-    // Only the entries used by this attribution need to remain current.
-    // Dynamic pages can hydrate an unrelated preview, timestamp, or media
-    // block elsewhere in a large selection while the clicked source span is
-    // still byte-for-byte valid.
-    if (extractionSpanIsCurrent(rawStart, rawEnd)) return true;
+
+    // The original map is the cheapest and strongest identity signal. Check
+    // only the clicked attribution so unrelated hydration elsewhere in the
+    // selected document cannot invalidate an unchanged target.
+    if (extractionSpanIsCurrent(rawStart, rawEnd)) {
+      return resolveRange(rawStart, rawEnd);
+    }
+
+    // If the complete selection is still present, rebasing it preserves the
+    // server's original occurrence offsets even for repeated short phrases.
     if (
-      restoreAnchoredSpanEntries(rawStart, rawEnd) &&
+      refreshDetachedExtraction() &&
       extractionSpanIsCurrent(rawStart, rawEnd)
     ) {
-      return true;
+      return resolveRange(rawStart, rawEnd);
     }
-    if (
-      restoreWhatsAppSpanEntries(rawStart, rawEnd) &&
-      extractionSpanIsCurrent(rawStart, rawEnd)
-    ) {
-      return true;
-    }
-    if (!refreshDetachedExtraction()) return false;
-    return extractionSpanIsCurrent(rawStart, rawEnd);
+
+    // Otherwise resolve only the clicked quote within its original semantic
+    // source. Context disambiguates repeats; missing or tied matches fail.
+    return resolveSpanFromQuote(rawStart, rawEnd);
   }
 
   function mappedEntriesForSpan(rawStart, rawEnd) {
@@ -957,68 +1108,248 @@
     return true;
   }
 
-  function restoreAnchoredSpanEntries(rawStart, rawEnd) {
-    if (!isStableAnchor(extraction.anchor)) return false;
-    const scope = resolveAnchorScope(extraction.anchor);
-    if (!scope) return false;
+  function resolveSpanFromQuote(rawStart, rawEnd) {
     const target = mappedEntriesForSpan(rawStart, rawEnd);
-    if (!target) return false;
-    const replacements = [];
-    const styleCache = new WeakMap();
-    for (let index = target.first; index <= target.last; index++) {
-      const entry = extraction.map[index];
-      if (!Array.isArray(entry.anchorPath)) return false;
-      const candidate = nodeAtPath(scope, entry.anchorPath);
-      if (
-        candidate?.nodeType !== Node.TEXT_NODE ||
-        !mapEntryMatchesNode(
-          entry,
-          candidate,
-          scope,
-          styleCache,
-          target.start,
-          target.end
-        )
-      ) {
-        return false;
-      }
-      replacements.push({ entry, candidate });
+    if (!target) return null;
+    const scope = recoveryScopeForSpan(target);
+    if (!scope) return null;
+
+    const capturedProjection = buildQuoteProjection(
+      extraction.text,
+      extraction.map
+    );
+    const selector = makeQuoteSelector(capturedProjection, target);
+    if (!selector.exact) return null;
+
+    // Selectability is a capture concern, not a liveness requirement. Dynamic
+    // apps may remove a temporary user-select override while the source remains
+    // rendered and attributable.
+    const rebuilt = extractFromRoot(
+      scope,
+      true,
+      MAX_QUOTE_SOURCE_LENGTH
+    );
+    if (rebuilt.overflow) return null;
+    const liveProjection = buildQuoteProjection(rebuilt.text, rebuilt.map);
+    const match = chooseQuoteMatch(liveProjection.text, selector);
+    if (!match) return null;
+
+    const canonicalStart = liveProjection.canonicalOffsets[match.index];
+    const canonicalEnd =
+      liveProjection.canonicalOffsets[
+        match.index + selector.exact.length - 1
+      ] + 1;
+    if (
+      !Number.isFinite(canonicalStart) ||
+      !Number.isFinite(canonicalEnd)
+    ) {
+      return null;
     }
-    for (const { entry, candidate } of replacements) {
-      entry.node = candidate;
+    const resolved = resolveRangeFromMap(
+      rebuilt.map,
+      canonicalStart,
+      canonicalEnd
+    );
+    if (!resolved) return null;
+    if (
+      match.evidence === "path" &&
+      !rangeMatchesCapturedPath(resolved.range, target, scope)
+    ) {
+      return null;
     }
-    return true;
+    return resolved;
   }
 
-  function restoreWhatsAppSpanEntries(rawStart, rawEnd) {
-    const target = mappedEntriesForSpan(rawStart, rawEnd);
-    if (!target) return false;
-    const replacements = [];
-    const styleCache = new WeakMap();
-    for (let index = target.first; index <= target.last; index++) {
-      const entry = extraction.map[index];
-      const scope = resolveWhatsAppMessageScope(entry.messageAnchor);
-      if (!scope) return false;
-      const candidate = nodeAtPath(scope, entry.messageAnchor.path);
-      if (
-        candidate?.nodeType !== Node.TEXT_NODE ||
-        !mapEntryMatchesNode(
-          entry,
-          candidate,
-          scope,
-          styleCache,
-          target.start,
-          target.end
-        )
-      ) {
-        return false;
+  function recoveryScopeForSpan(target) {
+    const entries = extraction.map.slice(target.first, target.last + 1);
+    const messageAnchors = entries
+      .map((entry) => entry.messageAnchor)
+      .filter(Boolean);
+    if (messageAnchors.length) {
+      // A reused conversation root is not a message identity. Recover only
+      // when every target entry belongs to one exact serialized message.
+      if (messageAnchors.length !== entries.length) return null;
+      const ids = new Set(messageAnchors.map((anchor) => anchor.dataId));
+      if (ids.size !== 1) return null;
+      return resolveWhatsAppMessageScope(messageAnchors[0]);
+    }
+    if (location.hostname === "web.whatsapp.com") return null;
+
+    const anchored = resolveAnchorScope(extraction.anchor);
+    if (isStableAnchor(extraction.anchor)) return anchored;
+    return anchored || document.body;
+  }
+
+  function buildQuoteProjection(text, map) {
+    let projected = "";
+    const canonicalOffsets = [];
+    let inWhitespace = false;
+    let mapIndex = 0;
+
+    for (let index = 0; index < text.length; index++) {
+      while (mapIndex < map.length && map[mapIndex].end <= index) mapIndex++;
+      const mapped =
+        mapIndex < map.length &&
+        map[mapIndex].start <= index &&
+        index < map[mapIndex].end;
+      const ch = text[index];
+      if (isWs(ch)) {
+        if (inWhitespace) continue;
+        inWhitespace = true;
+        projected += " ";
+        canonicalOffsets.push(index);
+        continue;
       }
-      replacements.push({ entry, candidate });
+      // Synthetic block separators are whitespace. Any other unmapped
+      // character is not backed by a live DOM position and is ignored.
+      if (!mapped) continue;
+      inWhitespace = false;
+      projected += ch;
+      canonicalOffsets.push(index);
     }
-    for (const { entry, candidate } of replacements) {
-      entry.node = candidate;
+    return { text: projected, canonicalOffsets };
+  }
+
+  function makeQuoteSelector(projection, target) {
+    const startEntry = extraction.map[target.first];
+    const endEntry = extraction.map[target.last];
+    const exact = projectedSlice(
+      projection,
+      target.start,
+      target.end
+    ).trim();
+    // Prefer context inside the boundary Text nodes so a paragraph can move
+    // without being tied to its old neighbor. Selection-wide context provides
+    // evidence when the quote consumes an entire boundary node.
+    const localPrefix = projectedSlice(
+      projection,
+      startEntry.start,
+      target.start
+    ).slice(-QUOTE_CONTEXT_LENGTH);
+    const localSuffix = projectedSlice(
+      projection,
+      target.end,
+      endEntry.end
+    ).slice(0, QUOTE_CONTEXT_LENGTH);
+    const selectionPrefix = projectedSlice(
+      projection,
+      0,
+      target.start
+    ).slice(-QUOTE_CONTEXT_LENGTH);
+    const selectionSuffix = projectedSlice(
+      projection,
+      target.end,
+      extraction.text.length
+    ).slice(0, QUOTE_CONTEXT_LENGTH);
+    const scopedPrefix = (
+      (startEntry.scopePrefix || "") + localPrefix
+    ).slice(-QUOTE_CONTEXT_LENGTH);
+    const scopedSuffix = (
+      localSuffix + (endEntry.scopeSuffix || "")
+    ).slice(0, QUOTE_CONTEXT_LENGTH);
+    const blockPrefix = (
+      (startEntry.blockPrefix || "") + localPrefix
+    ).slice(-QUOTE_CONTEXT_LENGTH);
+    const blockSuffix = (
+      localSuffix + (endEntry.blockSuffix || "")
+    ).slice(0, QUOTE_CONTEXT_LENGTH);
+    const contexts = [];
+    addQuoteContext(contexts, localPrefix, localSuffix);
+    addQuoteContext(contexts, blockPrefix, blockSuffix);
+    addQuoteContext(contexts, scopedPrefix, scopedSuffix);
+    addQuoteContext(contexts, selectionPrefix, selectionSuffix);
+    return { exact, contexts };
+  }
+
+  function addQuoteContext(contexts, prefix, suffix) {
+    if (!prefix && !suffix) return;
+    if (
+      contexts.some(
+        (context) =>
+          context.prefix === prefix && context.suffix === suffix
+      )
+    ) {
+      return;
     }
-    return true;
+    contexts.push({ prefix, suffix });
+  }
+
+  function projectedSlice(projection, canonicalStart, canonicalEnd) {
+    let value = "";
+    for (let index = 0; index < projection.text.length; index++) {
+      const offset = projection.canonicalOffsets[index];
+      if (offset < canonicalStart) continue;
+      if (offset >= canonicalEnd) break;
+      value += projection.text[index];
+    }
+    return value;
+  }
+
+  function chooseQuoteMatch(text, selector) {
+    const matches = [];
+    let cursor = 0;
+    while (cursor <= text.length - selector.exact.length) {
+      const match = text.indexOf(selector.exact, cursor);
+      if (match < 0) break;
+      matches.push(match);
+      if (matches.length > MAX_QUOTE_MATCHES) return null;
+      cursor = match + 1;
+    }
+    if (!matches.length) return null;
+
+    const supported = new Set();
+    for (const context of selector.contexts) {
+      const contextual = matches.filter((match) =>
+        quoteContextMatches(text, selector.exact, match, context)
+      );
+      if (contextual.length === 1) supported.add(contextual[0]);
+    }
+    if (supported.size === 1) {
+      return { index: [...supported][0], evidence: "context" };
+    }
+    // A lone exact quote is only tentative: it still has to occupy the saved
+    // path and raw offsets. Otherwise a mutated original could redirect to a
+    // surviving duplicate elsewhere in the same source.
+    return matches.length === 1
+      ? { index: matches[0], evidence: "path" }
+      : null;
+  }
+
+  function quoteContextMatches(text, exact, match, context) {
+    const prefixMatches =
+      !context.prefix ||
+      text.slice(match - context.prefix.length, match) === context.prefix;
+    const suffixMatches =
+      !context.suffix ||
+      text.slice(
+        match + exact.length,
+        match + exact.length + context.suffix.length
+      ) === context.suffix;
+    return prefixMatches && suffixMatches;
+  }
+
+  function rangeMatchesCapturedPath(range, target, scope) {
+    const startEntry = extraction.map[target.first];
+    const endEntry = extraction.map[target.last];
+    const startPath =
+      startEntry.messageAnchor?.path || startEntry.anchorPath;
+    const endPath = endEntry.messageAnchor?.path || endEntry.anchorPath;
+    if (!Array.isArray(startPath) || !Array.isArray(endPath)) return false;
+
+    const startNode = nodeAtPath(scope, startPath);
+    const endNode = nodeAtPath(scope, endPath);
+    const startIndex = Math.max(target.start, startEntry.start);
+    const endIndex = Math.min(target.end - 1, endEntry.end - 1);
+    const startOffset =
+      startEntry.rawOffsets[startIndex - startEntry.start];
+    const endOffset =
+      endEntry.rawOffsets[endIndex - endEntry.start] + 1;
+    return (
+      startNode === range.startContainer &&
+      endNode === range.endContainer &&
+      startOffset === range.startOffset &&
+      endOffset === range.endOffset
+    );
   }
 
   function mapEntryIsCurrent(
@@ -1075,8 +1406,10 @@
     if (!extraction || !extraction.map.length) return null;
     const { start, end } = clampSpan(extraction.text, rawStart, rawEnd);
     if (end <= start) return null;
+    return resolveRangeFromMap(extraction.map, start, end);
+  }
 
-    const map = extraction.map;
+  function resolveRangeFromMap(map, start, end) {
     // The extraction string contains synthetic "\n" block separators that have
     // no map entry. Clamp ends onto real mapped characters.
     const startEntry = findEntry(map, start) || firstEntryAtOrAfter(map, start);
