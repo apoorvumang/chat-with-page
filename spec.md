@@ -138,17 +138,30 @@ Unrelated nodes elsewhere in the captured selection may hydrate or rerender
 without invalidating an unchanged target. A connected target Text node whose
 data React changed in place is still rejected.
 
-If target nodes were replaced, it first restores the affected entries by exact
-child paths beneath a stable Gmail message ID, WhatsApp serialized message ID,
-public X tweet ID, logged-in X status permalink, X Article root, or uniquely
-headed semantic `article`. If that path recovery cannot prove an exact match,
-the existing complete-selection rebase may run inside the same identified
-source. A stable source is never allowed to fall through to a page-wide match,
-where the same words might belong to another message, post, or article region.
+If target nodes were replaced, the resolver first tries an exact
+complete-selection rebase, preserving the server's original occurrence
+offsets. It then constructs a fresh, rendered-text projection beneath the same
+Gmail message ID, WhatsApp serialized message ID, public X tweet ID, logged-in
+X status permalink, X Article root, uniquely headed semantic `article`, or
+conservative generic scope. The projection is case-sensitive, maps every
+DOM-backed character back to a live Text node, and treats synthetic block
+separators as normalized whitespace so node split/merge and block-to-inline
+wrapper changes do not alter the quote.
+
+Repeated quotes require a unique bounded prefix/suffix context captured from
+the boundary block and semantic scope, including immediately outside the
+selection. A lone quote without matching context is accepted only when its live
+Range still occupies the captured source path and raw offsets. Paths and
+occurrence order are hints, never sufficient evidence after a reorder. A stable
+source is never allowed to fall through to a page-wide match, where the same
+words might belong to another message, post, or article region. Fresh
+projections are built lazily on an attribution click and have source/candidate
+caps; the extension does not observe or mirror page mutations continuously.
 
 Identity-less captures may use a body-wide fallback only when the complete
-captured text occurs exactly once. Missing or duplicate matches fail visibly;
-the extension does not use `window.find` or select the first arbitrary copy.
+captured text or context-validated quote proves one occurrence. Missing,
+duplicate, route-mismatched, or changed-target matches fail visibly; the
+extension does not use `window.find` or select the first arbitrary copy.
 
 ## Message protocol
 

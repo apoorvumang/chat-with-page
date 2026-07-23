@@ -158,11 +158,13 @@ out of the canonical document.
 The server's source bounds identify the intended occurrence in the original
 canonical document. Navigation validates only the attributed source span, so
 unrelated hydration elsewhere in the selection does not invalidate an unchanged
-target. If its nodes were replaced, the content script restores exact paths
-beneath stable Gmail or WhatsApp message IDs, X post/status/article identities,
-or a uniquely headed semantic article before using those bounds. Changed target
-text and ambiguous fallback matches fail instead of highlighting an arbitrary
-duplicate.
+target. If its nodes were replaced, the content script resolves a case-sensitive
+exact quote beneath the original Gmail or WhatsApp message, X
+post/status/article identity, uniquely headed semantic article, or conservative
+generic scope. A live text projection tolerates node split/merge and wrapper
+whitespace changes, while bounded local context disambiguates repeats. Changed
+routes, changed target text, surviving duplicates, and ambiguous matches fail
+instead of highlighting an arbitrary occurrence.
 
 ## Data and privacy
 
